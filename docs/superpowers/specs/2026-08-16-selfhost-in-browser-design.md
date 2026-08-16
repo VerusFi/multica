@@ -121,14 +121,24 @@ Three areas on `selfhost.html`:
    **"Create a self host instance"**; clicking it expands the full configuration form,
    which ends with a **"Create instance"** button that creates the instance with the
    typed configuration. Fields (all of these **required**): instance name, vault PIN,
-   reserved disk size (GB), relay WebSocket address (default `ws://localhost:8086`),
-   plus the disk passphrase (+ confirmation) — required by the LUKS design. After
+   reserved disk size (GB), relay WebSocket address (default `wisp://localhost:8086`;
+   `ws://`/`wss://` accepted for layer-2 proxies such as wsnic), plus the disk
+   passphrase (+ confirmation) — required by the LUKS design. After
    creation, **"Run on Linux contained in this page (100% private)"** starts the
    instance.
 
    **Relay pre-flight check:** the very first thing "Create instance" does is test the
    relay — open a WebSocket connection to the configured address. If the connection
    cannot be established, show a clear error to the user and do not create the instance.
+
+   **In-page relay instructions:** next to the relay field, the creation form embeds
+   copy-paste instructions for running a self-hosted relay on **macOS, Linux, and
+   Windows** — no Docker required, no package manager required. Following LinuxOnTab's
+   distribution pattern (`sh <(curl -sS …/script.sh)`), each tab shows a one-liner that
+   uses only tools the OS already ships (curl / PowerShell) to download a small static
+   `multica-relay` binary from the fork's GitHub Releases and run it in the terminal
+   (see §6). The error shown by the pre-flight check links straight to these
+   instructions.
 2. **Instance list** — on load, the page asks for the PIN, decrypts the vault, and lists
    every previously configured instance found in IndexedDB: name, configuration summary,
    running/paused/stopped indicator, and buttons **play**, **pause**, **stop** (visible
@@ -186,7 +196,9 @@ Everything lives in the fork:
 - `.github/workflows/selfhost-release.yml` — builds `multica-selfhost-386.tar.gz`
   (backend `GOARCH=386`; frontend `next build` standalone with 386-native modules built in
   a `linux/386` container; migrations) and publishes it as a GitHub Release. This is what
-  first boot downloads.
+  first boot downloads. The same workflow cross-compiles the `multica-relay` static
+  binaries (macOS arm64/x86_64, Linux, Windows) and attaches them to the release;
+  `relay.sh` / `relay.ps1` live in `deploy/selfhost-web/` and are served by Pages.
 - `.github/workflows/selfhost-pages.yml` — publishes `deploy/selfhost-web/` to GitHub
   Pages.
 - Real landing (`apps/web/features/landing/`): add a "Selfhost" button to
@@ -204,16 +216,27 @@ hero/footer — the replica mirrors the spirit, not the DOM.)
 ### Documentation (`deploy/selfhost-web/README.md`)
 
 - Enabling GitHub Pages on a fork and pointing it at the workflow.
-- **Running a self-hosted relay on a Mac**, following the LinuxOnTab approach (they
-  instruct deploying "any WISP v1 server"); two documented options:
-  - **WISP server (simple, macOS-native):** a plain WebSocket utility that runs with
-    Node alone — no Docker, no TUN/TAP (e.g. `npx wisp-server-node`); v86 connects with
-    `wisp://localhost:PORT`. Caveat to verify during implementation: v86's WISP backend
-    is currently TCP-only, so guest DNS-over-UDP must be confirmed (or DNS handled by
-    the proxy).
-  - **wsnic (full layer-2, proven in the spike):** the Docker one-liner
-    (`docker run … --cap-add=NET_ADMIN --device /dev/net/tun -p 8086:8086 chschnell86/wsnic -i`)
-    providing DHCP/DNS/NAT.
+- **Running a self-hosted relay** — the primary path requires **no Docker and no
+  package manager**, mirroring LinuxOnTab's model (their network egress is a hosted
+  "WISP v1 server"; their docs say "deploy any WISP v1 server", and their host-side
+  helper scripts are distributed as `sh <(curl -sS …)` one-liners). Ours:
+  - **`multica-relay` (default, all platforms):** a single static WISP v1 server binary,
+    cross-compiled by `selfhost-release.yml` for macOS (arm64/x86_64), Linux and
+    Windows, published on the fork's GitHub Releases. Started by a one-liner shown
+    directly in the creation page, using only tools the OS ships:
+    - macOS / Linux: `curl -fsSL https://<pages-url>/relay.sh | sh`
+    - Windows: `irm https://<pages-url>/relay.ps1 | iex`
+    The script detects OS/arch, downloads the binary, and runs it in the foreground;
+    v86 connects with `wisp://localhost:PORT`. Verification task inherited from the
+    risk table: v86's WISP backend is TCP-only today, so guest DNS must be confirmed
+    (the relay can answer DNS itself if needed).
+  - **wsnic (advanced alternative, proven in the spike):** full layer-2 relay with
+    DHCP/DNS/NAT for those who prefer it and have Docker
+    (`docker run … --cap-add=NET_ADMIN --device /dev/net/tun -p 8086:8086 chschnell86/wsnic -i`).
+  - Note for the record: LinuxOnTab's `websocat`-based script (`tunnel-listen.sh`,
+    "Requires: websocat (brew install websocat)") is their host-side **port tunnel**
+    (SSH/SCP into the guest), not the network relay; our POC does not need it because
+    View Console already provides terminal access.
   - Plus the `wss://` requirement for non-localhost relays behind HTTPS pages.
 - Local usage without Pages (any static file server).
 - The manual end-to-end checklist (see §8).
