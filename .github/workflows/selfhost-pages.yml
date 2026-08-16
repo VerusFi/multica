@@ -1,0 +1,38 @@
+name: selfhost-pages
+
+on:
+  push:
+    branches: [main, feature/selfhost-in-browser]
+    paths: ["deploy/selfhost-web/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: selfhost-pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      # Page assets only: dev harness, tests, relay sources and node_modules
+      # never ship to Pages (plan Task 17).
+      - name: Stage page assets
+        run: |
+          mkdir -p "$RUNNER_TEMP/pages-artifact"
+          rsync -a deploy/selfhost-web/ "$RUNNER_TEMP/pages-artifact/" \
+            --exclude dev/ --exclude tests/ --exclude relay/ --exclude node_modules/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ runner.temp }}/pages-artifact
+      - id: deployment
+        uses: actions/deploy-pages@v4
