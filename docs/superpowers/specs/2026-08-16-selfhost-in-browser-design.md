@@ -116,13 +116,24 @@ space runs out. Data is lost only if the person clears the site's browser data.
 
 Three areas on `selfhost.html`:
 
-1. **"Self hosting" panel** — fields: instance name, disk passphrase (+ confirmation),
-   disk size (GB), relay WebSocket address (default `ws://localhost:8086`), vault PIN, and
-   the button **"Run on Linux contained in this page (100% private)"**.
+1. **"Self hosting" panel — instance creation flow.** When no instance exists, creating
+   one is the only action offered. The entry point is a button titled
+   **"Create a self host instance"**; clicking it expands the full configuration form,
+   which ends with a **"Create instance"** button that creates the instance with the
+   typed configuration. Fields (all of these **required**): instance name, vault PIN,
+   reserved disk size (GB), relay WebSocket address (default `ws://localhost:8086`),
+   plus the disk passphrase (+ confirmation) — required by the LUKS design. After
+   creation, **"Run on Linux contained in this page (100% private)"** starts the
+   instance.
+
+   **Relay pre-flight check:** the very first thing "Create instance" does is test the
+   relay — open a WebSocket connection to the configured address. If the connection
+   cannot be established, show a clear error to the user and do not create the instance.
 2. **Instance list** — on load, the page asks for the PIN, decrypts the vault, and lists
    every previously configured instance found in IndexedDB: name, configuration summary,
    running/paused/stopped indicator, and buttons **play**, **pause**, **stop** (visible
-   only while running), **View Console**, **Open Dashboard**.
+   only while running), **View Console**, **Open Dashboard**. With zero instances, the
+   list area shows the creation flow above instead.
 3. **View Console** — an interactive xterm.js terminal attached to the guest's `ttyS0`:
    a real root shell for administering the instance. During first boot it shows the
    provisioning progress bar fed by the serial markers.
@@ -193,9 +204,17 @@ hero/footer — the replica mirrors the spirit, not the DOM.)
 ### Documentation (`deploy/selfhost-web/README.md`)
 
 - Enabling GitHub Pages on a fork and pointing it at the workflow.
-- Running the relay: the wsnic Docker one-liner
-  (`docker run … --cap-add=NET_ADMIN --device /dev/net/tun -p 8086:8086 chschnell86/wsnic -i`),
-  plus the `wss://` requirement for non-localhost relays behind HTTPS pages.
+- **Running a self-hosted relay on a Mac**, following the LinuxOnTab approach (they
+  instruct deploying "any WISP v1 server"); two documented options:
+  - **WISP server (simple, macOS-native):** a plain WebSocket utility that runs with
+    Node alone — no Docker, no TUN/TAP (e.g. `npx wisp-server-node`); v86 connects with
+    `wisp://localhost:PORT`. Caveat to verify during implementation: v86's WISP backend
+    is currently TCP-only, so guest DNS-over-UDP must be confirmed (or DNS handled by
+    the proxy).
+  - **wsnic (full layer-2, proven in the spike):** the Docker one-liner
+    (`docker run … --cap-add=NET_ADMIN --device /dev/net/tun -p 8086:8086 chschnell86/wsnic -i`)
+    providing DHCP/DNS/NAT.
+  - Plus the `wss://` requirement for non-localhost relays behind HTTPS pages.
 - Local usage without Pages (any static file server).
 - The manual end-to-end checklist (see §8).
 
@@ -210,11 +229,14 @@ hero/footer — the replica mirrors the spirit, not the DOM.)
 | First boot very slow under emulation | Progress bar with honest phase markers; happens once per instance |
 | PIN brute-force against the vault | Unlimited PIN length; heavy KDF; "remember passphrase" optional |
 | GitHub Pages 100 MB/file, ~1 GB/site | No system image at all (largest shipped file is the initramfs); release tarball hosted on GitHub Releases, not Pages |
+| v86 WISP backend is TCP-only (guest DNS over UDP may not work) | Verify early (plan task); if DNS fails over WISP, document wsnic as the required relay and keep WISP as roadmap |
 
 ## 8. Testing
 
-- **Unit tests** for `vault` (crypto round-trips, wrong-PIN behavior) and
-  `instance-manager` (IndexedDB schema, block read/write, snapshot bookkeeping).
+- **Unit tests** for `vault` (crypto round-trips, wrong-PIN behavior),
+  `instance-manager` (IndexedDB schema, block read/write, snapshot bookkeeping), and the
+  creation-form validation (all required fields enforced; relay pre-flight failure blocks
+  creation with a visible error).
 - **Playwright smoke e2e** (slow, on-demand): load `selfhost.html`, create an instance
   against a real local relay, boot to the shell-ready serial marker.
 - **Manual end-to-end checklist** in the README: full first boot → dashboard opens →
