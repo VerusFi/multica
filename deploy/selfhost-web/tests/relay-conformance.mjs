@@ -210,7 +210,7 @@ try {
 
   await test("foreign Origin is rejected", async () => {
     const { status } = await wsHandshake(relay.port, "https://evil.example");
-    assert(status !== 101, `expected a non-101 response, got ${status}`);
+    assert(status === 403, `expected 403 for a foreign Origin, got ${status}`);
   });
 
   await test("absent Origin is accepted (non-browser client)", async () => {
@@ -326,7 +326,7 @@ try {
 
   await test("other foreign Origins stay rejected on the -origin relay", async () => {
     const { status } = await wsHandshake(relayAllowed.port, "https://evil.example");
-    assert(status !== 101, `expected a non-101 response, got ${status}`);
+    assert(status === 403, `expected 403 for a foreign Origin, got ${status}`);
   });
 } finally {
   relayAllowed.stop();
