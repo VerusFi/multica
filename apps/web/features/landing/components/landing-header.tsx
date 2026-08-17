@@ -9,6 +9,7 @@ import { useAuthStore } from "@multica/core/auth";
 import { docsHrefForLocale, useLocale } from "../i18n";
 import { useDashboardCtaHref } from "../utils/use-dashboard-cta";
 import { formatStarCount, useGithubStars } from "../utils/use-github-stars";
+import { selfhostNavUrl } from "../utils/selfhost-url";
 import { GitHubMark, githubUrl, headerButtonClassName } from "./shared";
 
 export function LandingHeader({
@@ -22,10 +23,15 @@ export function LandingHeader({
   const starsLabel = stars != null ? formatStarCount(stars) : null;
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const docsHref = docsHrefForLocale(locale);
+  // Selfhost lives on a separate static site, so the entry only exists when
+  // a deployment points at it via NEXT_PUBLIC_SELFHOST_URL — see
+  // selfhostNavUrl. Omitted rather than rendered as a 404 link.
+  const selfhostUrl = selfhostNavUrl();
   const navLinks = [
     { href: "/usecases", label: t.header.useCases },
     { href: docsHref, label: t.header.docs },
     { href: "/changelog", label: t.header.changelog },
+    ...(selfhostUrl ? [{ href: selfhostUrl, label: t.header.selfhost }] : []),
   ];
   const ctaHref = useDashboardCtaHref();
   const ctaLabel = user ? t.header.dashboard : t.header.cta;

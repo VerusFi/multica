@@ -1,0 +1,99 @@
+<!doctype html>
+<!--
+  Throwaway v86 boot-test harness for Task 7 (guest provisioning stage 2:
+  Alpine install onto the encrypted disk). NOT part of the shipped page.
+  Identical plumbing to dev/harness-luks.html (Task 6) — networking (wisp://
+  relay), passphrase over ttyS1, empty async-loaded 2 GiB disk — plus marks
+  for the two extra unprompted phase markers stage2_install emits
+  (@@SH:phase:install@@, @@SH:phase:download@@). See dev/NOTES.md "Task 6"
+  section for the full writeup of the disk-image/passphrase-API choices,
+  which are unchanged here.
+
+  No temporary debug-shell insertion needed for this task (unlike Task 6):
+  guest/init-selfhost's main sequence already calls `stage3_multica` right
+  after `stage2_install` succeeds, and stage3_multica is intentionally still
+  undefined until Task 8 — so the shipped (committed), unmodified
+  init-selfhost naturally falls through to `fail "multica-failed"` ->
+  `exec /bin/sh` once stage2_install completes, giving a real debug shell
+  over ttyS0 via the exact code path Task 6 documented for its own
+  "shipped build" run. This IS the shipped artifact; nothing here is a
+  test-only modification.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>selfhost-web verify-install harness</title>
+</head>
+<body>
+<script src="node_modules/v86/build/libv86.js"></script>
+<script>
+  const ANSI_RE = /\x1b(\[[0-9;?]*[A-Za-z]|[78])/g;
+  const MAX_LOG = 800_000; // stage2_install's ~40+ package apk output is chattier than Task 6's LUKS/btrfs log
+
+  window.bootMarks = {};
+  window.serialLog = "";
+
+  let rawBuf = "";
+
+  function mark(name) {
+    if (!(name in window.bootMarks)) {
+      window.bootMarks[name] = Date.now();
+      console.log("[bootmark]", name, window.bootMarks[name]);
+    }
+  }
+
+  function onSerialByte(byte) {
+    rawBuf += String.fromCharCode(byte);
+    if (rawBuf.length > MAX_LOG) rawBuf = rawBuf.slice(-MAX_LOG / 2);
+    window.serialLog = rawBuf.replace(ANSI_RE, "");
+
+    // /init prints these itself, unprompted — not typed/echoed input, so no
+    // split-marker anti-echo trick needed (see dev/NOTES.md, Task 3 section).
+    if (/@@SH:phase:network@@/.test(window.serialLog)) mark("phase-network");
+    if (/@@SH:phase:luks@@/.test(window.serialLog)) mark("phase-luks");
+    if (/@@SH:phase:install@@/.test(window.serialLog)) mark("phase-install");
+    if (/@@SH:phase:download@@/.test(window.serialLog)) mark("phase-download");
+    if (/@@SH:err:/.test(window.serialLog)) {
+      const m = window.serialLog.match(/@@SH:err:([^@]*)@@/);
+      if (m) mark("err-" + m[1]);
+    }
+  }
+
+  // Send a shell command (with trailing newline) over ttyS0, to the debug
+  // shell reached via the natural stage3_multica-not-found fallthrough
+  // (see the file-level comment above).
+  window.sendCmd = function sendCmd(cmd) {
+    window.emulator.serial0_send(cmd + "\n");
+  };
+
+  // Send the passphrase over ttyS1 (uart1) per the Global Constraints
+  // contract: newline-terminated, never on ttyS0/cmdline/storage.
+  window.sendPassphrase = function sendPassphrase(pass) {
+    window.emulator.serial_send_bytes(1, new TextEncoder().encode(pass + "\n"));
+  };
+
+  mark("boot-start");
+
+  window.emulator = new V86({
+    wasm_path: "node_modules/v86/build/v86.wasm",
+    // Bumped from Task 6's 256 MiB — stage2_install pulls in PostgreSQL 17
+    // + Node.js + full Alpine base, more apk extraction/chroot headroom
+    // than the LUKS/btrfs-only Task 6 stage needed.
+    memory_size: 512 * 1024 * 1024,
+    vga_memory_size: 2 * 1024 * 1024,
+    bios: { url: "bios/seabios.bin" },
+    vga_bios: { url: "bios/vgabios.bin" },
+    bzimage: { url: "../boot/vmlinuz" },
+    initrd: { url: "../boot/initramfs.img" },
+    cmdline: "console=ttyS0,115200",
+    hda: { url: "empty-disk.img", async: true, size: 2 * 1024 * 1024 * 1024 },
+    uart1: true,
+    net_device: { type: "virtio", relay_url: "wisp://localhost:18086/" },
+    autostart: true,
+  });
+
+  window.emulator.add_listener("serial0-output-byte", onSerialByte);
+  window.emulator.add_listener("emulator-ready", () => mark("emulator-ready"));
+</script>
+</body>
+</html>

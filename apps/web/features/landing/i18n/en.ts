@@ -10,6 +10,7 @@ export function createEnDict(allowSignup: boolean): LandingDict {
     docs: "Docs",
     changelog: "Changelog",
     useCases: "Use cases",
+    selfhost: "Selfhost",
     navigation: "Primary navigation",
     openMenu: "Open navigation menu",
     closeMenu: "Close navigation menu",

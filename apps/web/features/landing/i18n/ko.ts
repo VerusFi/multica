@@ -14,6 +14,7 @@ export function createKoDict(allowSignup: boolean): LandingDict {
       docs: "문서",
       changelog: "변경 로그",
       useCases: "사용 사례",
+      selfhost: "셀프 호스팅",
       navigation: "주요 메뉴",
       openMenu: "메뉴 열기",
       closeMenu: "메뉴 닫기",

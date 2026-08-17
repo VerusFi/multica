@@ -47,6 +47,7 @@ export type LandingDict = {
     docs: string;
     changelog: string;
     useCases: string;
+    selfhost: string;
     navigation: string;
     openMenu: string;
     closeMenu: string;

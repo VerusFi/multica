@@ -1,0 +1,30 @@
+#!/sbin/openrc-run
+# OpenRC service for the multica frontend (Next.js standalone server.js).
+# Installed by stage3_multica (guest/provision.sh) into /mnt/etc/init.d/multica-web
+# and shipped into the initramfs at /guest/multica-web.initd via build-boot.sh's
+# mkinitfs features.d/selfhost.files list — see that file's comments for why
+# extra content has to be listed there to actually land in the image.
+
+name="multica-web"
+description="Multica frontend (Next.js standalone server)"
+command="/usr/bin/node"
+command_args="/opt/multica/frontend/apps/web/server.js"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+directory="/opt/multica/frontend/apps/web"
+
+depend() {
+	need multica-backend
+	need net
+	after multica-backend
+}
+
+# See multica-backend.initd for why start_pre (not a wrapper script) is the
+# right place to export the command's environment.
+start_pre() {
+	export REMOTE_API_URL="http://127.0.0.1:8080"
+	export HOSTNAME="0.0.0.0"
+	export PORT="3000"
+}

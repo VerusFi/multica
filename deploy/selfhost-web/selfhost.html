@@ -1,0 +1,325 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>multica — self host</title>
+<meta name="description" content="Run a private multica instance entirely inside this browser tab.">
+<link rel="stylesheet" href="vendor/xterm.css">
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #0b0d10;
+    --bg-raised: #14171c;
+    --fg: #e6e6e6;
+    --fg-muted: #9aa3ad;
+    --border: #2a2f37;
+    --accent: #7ab8ff;
+    --accent-fg: #06141f;
+    --danger: #ff8080;
+    --danger-bg: #2a1418;
+    --danger-border: #5c2530;
+    --radius: 10px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f6f7f9;
+      --bg-raised: #ffffff;
+      --fg: #1b1f24;
+      --fg-muted: #5b6472;
+      --border: #d9dee4;
+      --accent: #1a6fd6;
+      --accent-fg: #ffffff;
+      --danger: #b3261e;
+      --danger-bg: #fdecea;
+      --danger-border: #f3c2bd;
+    }
+  }
+  [hidden] { display: none !important; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; min-height: 100dvh;
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    padding: 2.5rem 1.5rem 1rem; text-align: center;
+  }
+  header h1 { margin: 0 0 0.4rem; font-size: 1.7rem; letter-spacing: 0.01em; }
+  header .tagline { margin: 0; color: var(--fg-muted); }
+  main {
+    max-width: 640px; margin: 0 auto; padding: 1.5rem 1.5rem 4rem;
+  }
+  section#instance-panel { display: flex; flex-direction: column; gap: 1.25rem; }
+  #empty-state { display: flex; justify-content: center; padding: 2rem 0; }
+
+  button {
+    font: inherit; cursor: pointer; border-radius: 8px; border: 1px solid var(--border);
+    padding: 0.6rem 1.1rem; background: var(--bg-raised); color: var(--fg);
+  }
+  button:hover { border-color: var(--accent); }
+  button:disabled { opacity: 0.6; cursor: not-allowed; }
+  #btn-show-create, #btn-create {
+    background: var(--accent); color: var(--accent-fg); border-color: var(--accent);
+    font-weight: 600; padding: 0.75rem 1.4rem;
+  }
+
+  form#creation-form, form#pin-gate-form {
+    background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 1.5rem; display: flex; flex-direction: column; gap: 1.1rem;
+  }
+  form#creation-form h2, form#pin-gate-form h2 { margin: 0; font-size: 1.2rem; }
+  .field { display: flex; flex-direction: column; gap: 0.3rem; }
+  .field label { font-size: 0.9rem; color: var(--fg-muted); }
+  .field input {
+    font: inherit; padding: 0.55rem 0.7rem; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--bg); color: var(--fg);
+  }
+  .field input[aria-invalid="true"] { border-color: var(--danger); }
+  .field-error { margin: 0; color: var(--danger); font-size: 0.85rem; min-height: 1.1em; }
+  .hint { margin: 0; font-size: 0.85rem; color: var(--fg-muted); }
+  .hint a { color: var(--accent); }
+
+  .banner { border-radius: 8px; padding: 0.8rem 1rem; font-size: 0.9rem; margin: 0; }
+  .banner-error { background: var(--danger-bg); border: 1px solid var(--danger-border); color: var(--danger); }
+  .banner-error a { color: inherit; text-decoration: underline; }
+
+  .actions { display: flex; gap: 0.75rem; }
+
+  #relay-instructions { border-top: 1px solid var(--border); padding-top: 1rem; display: flex; flex-direction: column; gap: 0.75rem; }
+  #relay-instructions h3 { margin: 0; font-size: 1rem; }
+  .tabs { display: flex; gap: 0.4rem; }
+  .tab-btn { padding: 0.4rem 0.8rem; font-size: 0.85rem; }
+  .tab-btn[aria-selected="true"] { border-color: var(--accent); color: var(--accent); }
+  .tab-panel { display: flex; align-items: center; gap: 0.6rem; }
+  .tab-panel pre {
+    flex: 1; margin: 0; overflow-x: auto; padding: 0.6rem 0.8rem;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px; font-size: 0.85rem;
+  }
+  .copy-btn { font-size: 0.8rem; padding: 0.4rem 0.7rem; }
+
+  #instance-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.75rem; }
+  .instance-card {
+    background: var(--bg-raised); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 1rem 1.25rem; display: flex; flex-direction: column; gap: 0.5rem;
+  }
+  .instance-card strong { display: block; }
+  .instance-summary { margin: 0; color: var(--fg-muted); font-size: 0.9rem; }
+  .state-badge {
+    align-self: flex-start; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em;
+    padding: 0.15rem 0.5rem; border-radius: 999px; border: 1px solid var(--border); color: var(--fg-muted);
+  }
+  .phase-progress {
+    height: 0.5rem; border-radius: 999px; background: var(--bg);
+    border: 1px solid var(--border); position: relative; overflow: hidden;
+    font-size: 0; /* text content is a fallback for non-CSS contexts / tests, not visually shown */
+  }
+  .phase-progress::before {
+    content: ""; position: absolute; inset: 0; width: var(--pct, 0%);
+    background: var(--accent); transition: width 0.3s ease;
+  }
+  .instance-actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .delete-confirm { flex-wrap: wrap; align-items: center; margin-top: 0.25rem; }
+  .delete-confirm .hint { flex: 1 1 14rem; }
+  button.danger { color: var(--danger); border-color: var(--danger-border); }
+  button.danger:hover { border-color: var(--danger); }
+
+  /* Lifecycle error banner (js/ui.js's showLifecycleError): VmController's
+     onError reports, guest @@SH:err:*@@ markers, refused starts, failed
+     deletes. Sits above the list so it is visible whichever card it came
+     from. */
+  #lifecycle-error { display: flex; align-items: flex-start; gap: 0.75rem; }
+  #lifecycle-error > span { flex: 1; }
+
+  .console-drawer {
+    border-top: 1px solid var(--border); margin-top: 1rem; padding-top: 1rem;
+    display: flex; flex-direction: column; gap: 0.75rem;
+  }
+  .console-drawer-header { display: flex; align-items: center; justify-content: space-between; }
+  #console-mount { border: 1px solid var(--border); border-radius: 6px; overflow: hidden; padding: 0.25rem; background: #000; }
+
+  #dashboard-panel p, #dashboard-panel ol { font-size: 0.9rem; color: var(--fg-muted); margin: 0; }
+  #dashboard-panel ol { padding-left: 1.2rem; display: flex; flex-direction: column; gap: 0.3rem; }
+  #dashboard-panel code { background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 0.05rem 0.35rem; font-size: 0.85em; }
+  #dashboard-panel h4 { margin: 0.25rem 0 0; font-size: 0.9rem; color: var(--fg); }
+  #dashboard-healthcheck-result { font-size: 0.9rem; color: var(--fg-muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>multica — self host</h1>
+  <p class="tagline">A complete, private multica instance running entirely inside this browser tab.</p>
+</header>
+
+<main>
+  <section id="instance-panel" aria-live="polite">
+    <!-- Visible error surface for anything that goes wrong with a running or
+         starting instance (js/ui.js's showLifecycleError): autosave
+         failures, the guest's own @@SH:err:*@@ markers, a start refused for
+         a missing passphrase, a failed delete. Before this existed those all
+         went to console.error only, so a user saw an instance fail silently. -->
+    <div id="lifecycle-error" class="banner banner-error" data-testid="lifecycle-error" role="alert" hidden>
+      <span id="lifecycle-error-message"></span>
+      <button type="button" id="btn-lifecycle-error-dismiss" class="copy-btn">Dismiss</button>
+    </div>
+
+    <div id="empty-state">
+      <button id="btn-show-create" type="button">Create a self host instance</button>
+    </div>
+
+    <form id="creation-form" hidden>
+      <h2>Create a self host instance</h2>
+
+      <div class="field">
+        <label for="field-name">Instance name</label>
+        <input id="field-name" name="name" type="text" autocomplete="off">
+        <p class="field-error" data-error-for="name"></p>
+      </div>
+
+      <div class="field">
+        <label for="field-pin">Vault PIN</label>
+        <input id="field-pin" name="pin" type="password" autocomplete="off">
+        <p class="field-error" data-error-for="pin"></p>
+      </div>
+
+      <div class="field">
+        <label for="field-disk-size">Reserved disk size (GB)</label>
+        <input id="field-disk-size" name="diskSizeGB" type="number" min="1" step="1" value="8">
+        <p class="field-error" data-error-for="diskSizeGB"></p>
+      </div>
+
+      <div class="field">
+        <label for="field-relay-url">Relay address</label>
+        <input id="field-relay-url" name="relayUrl" type="text" value="wisp://localhost:8086">
+        <p class="field-error" data-error-for="relayUrl"></p>
+        <p class="hint">No relay running yet? See the instructions below.</p>
+      </div>
+
+      <div class="field">
+        <label for="field-passphrase">Disk passphrase</label>
+        <input id="field-passphrase" name="passphrase" type="password" autocomplete="off">
+        <p class="field-error" data-error-for="passphrase"></p>
+      </div>
+
+      <div class="field">
+        <label for="field-passphrase2">Confirm disk passphrase</label>
+        <input id="field-passphrase2" name="passphrase2" type="password" autocomplete="off">
+        <p class="field-error" data-error-for="passphrase2"></p>
+      </div>
+
+      <p id="relay-error" data-testid="relay-error" class="banner banner-error" hidden></p>
+
+      <div class="actions">
+        <button type="submit" id="btn-create">Create instance</button>
+        <button type="button" id="btn-cancel-create">Cancel</button>
+      </div>
+
+      <section id="relay-instructions" aria-labelledby="relay-instructions-heading">
+        <h3 id="relay-instructions-heading">Run a relay (no Docker, no package manager)</h3>
+        <div class="tabs" role="tablist">
+          <button type="button" class="tab-btn" role="tab" data-tab="macos" aria-selected="true">macOS</button>
+          <button type="button" class="tab-btn" role="tab" data-tab="linux" aria-selected="false">Linux</button>
+          <button type="button" class="tab-btn" role="tab" data-tab="windows" aria-selected="false">Windows</button>
+        </div>
+        <div class="tab-panel" data-tab-panel="macos">
+          <pre><code id="cmd-macos"></code></pre>
+          <button type="button" class="copy-btn" data-copy-target="cmd-macos">Copy</button>
+        </div>
+        <div class="tab-panel" data-tab-panel="linux" hidden>
+          <pre><code id="cmd-linux"></code></pre>
+          <button type="button" class="copy-btn" data-copy-target="cmd-linux">Copy</button>
+        </div>
+        <div class="tab-panel" data-tab-panel="windows" hidden>
+          <pre><code id="cmd-windows"></code></pre>
+          <button type="button" class="copy-btn" data-copy-target="cmd-windows">Copy</button>
+        </div>
+      </section>
+    </form>
+
+    <!-- Task 14: PIN gate — shown instead of everything else above whenever
+         a sealed vault blob already exists (a non-empty DB). See
+         js/ui.js's `checkVaultGate`. -->
+    <form id="pin-gate-form" hidden aria-labelledby="pin-gate-heading">
+      <h2 id="pin-gate-heading">Unlock your instances</h2>
+      <div class="field">
+        <label for="field-pin-gate">Vault PIN</label>
+        <input id="field-pin-gate" name="pin" type="password" autocomplete="off">
+      </div>
+      <p id="pin-gate-error" data-testid="pin-gate-error" class="banner banner-error" hidden></p>
+      <div class="actions">
+        <button type="submit" id="btn-unlock">Unlock</button>
+      </div>
+    </form>
+
+    <ul id="instance-list" hidden></ul>
+
+    <!-- Task 14: shared console drawer, opened per-instance by "View
+         Console" (attachConsole from js/console.js mounts into
+         #console-mount). -->
+    <section id="console-drawer" class="console-drawer" hidden aria-label="Instance console">
+      <div class="console-drawer-header">
+        <strong id="console-drawer-title"></strong>
+        <button type="button" id="btn-console-close">Close</button>
+      </div>
+      <div id="console-mount"></div>
+    </section>
+
+    <!-- Task 15: dashboard-access fallback panel, opened by "Open
+         Dashboard". v86's wisp:// network backend (Task 3's decision gate,
+         required for the guest's real internet access) has no JS-side API
+         for this page to open a connection into the guest — see
+         dev/NOTES.md "Task 15" for the full spike writeup — so this
+         documents the situation and offers the one thing that IS provable
+         from JS: a curl health check over the serial console. -->
+    <section id="dashboard-panel" class="console-drawer" hidden aria-label="Dashboard access">
+      <div class="console-drawer-header">
+        <strong id="dashboard-panel-title"></strong>
+        <button type="button" id="btn-dashboard-close">Close</button>
+      </div>
+      <p>
+        Direct in-tab dashboard access isn't available for this instance:
+        v86's <code>wisp://</code> network backend (used so the guest can
+        reach the real internet through your relay) has no JavaScript API
+        for this page to open a connection <em>into</em> the guest — only
+        v86's separate <code>fetch</code> backend exposes that, and only one
+        network backend can be active per instance. See this project's
+        <code>dev/NOTES.md</code> ("Task 15") for the full technical
+        writeup.
+      </p>
+      <div class="actions">
+        <button type="button" id="btn-dashboard-healthcheck">Run health check</button>
+        <span id="dashboard-healthcheck-result" data-testid="dashboard-healthcheck-result"></span>
+      </div>
+      <p id="dashboard-healthcheck-hint" class="hint" data-testid="dashboard-healthcheck-hint" hidden>
+        Close the console to run a health check — both share the guest's
+        serial console, and a health check sent while you're mid-typing a
+        console command would corrupt it.
+      </p>
+      <div>
+        <h4>Reach it another way</h4>
+        <ol>
+          <li>Click <strong>View Console</strong> above to get a root shell on the guest over the serial console.</li>
+          <li>From there you can inspect the running services directly — e.g. <code>curl localhost:3000</code>, <code>rc-status</code> — or use the health check above to confirm the frontend is answering on port 3000 without leaving this page.</li>
+          <li>A real browser tab pointed at the dashboard needs a TCP path from your machine into the guest's virtual network, which the current relay does not provide — it only relays the guest's own outbound connections, not inbound ones. Not implemented by this build.</li>
+        </ol>
+      </div>
+    </section>
+  </section>
+</main>
+
+<!-- Classic (non-module) UMD builds: libv86.js sets window.V86
+     (js/vm-controller.js's `new V86(...)`), xterm.js sets window.Terminal
+     (js/console.js). Both must load before the module script below. -->
+<script src="vendor/libv86.js"></script>
+<script src="vendor/xterm.js"></script>
+<script type="module">
+  // Relative, never origin-rooted ("/js/ui.js"): a GitHub Pages *project*
+  // site serves this page from a subpath (owner.github.io/<repo>/), where an
+  // absolute path resolves to the domain root and 404s, leaving the page
+  // inert. tests/subpath.spec.mjs (and the whole suite, which is served from
+  // a subpath prefix by tests/run-tests.mjs) guards this.
+  import { initSelfhostPage } from "./js/ui.js";
+  window.__selfhostReady = initSelfhostPage();
+</script>
+</body>
+</html>

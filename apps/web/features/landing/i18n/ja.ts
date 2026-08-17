@@ -14,6 +14,7 @@ export function createJaDict(allowSignup: boolean): LandingDict {
       docs: "ドキュメント",
       changelog: "変更履歴",
       useCases: "ユースケース",
+      selfhost: "セルフホスト",
       navigation: "メインナビゲーション",
       openMenu: "メニューを開く",
       closeMenu: "メニューを閉じる",

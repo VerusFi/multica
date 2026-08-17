@@ -1,0 +1,146 @@
+name: selfhost-release
+
+# Publishes the self-hosted-in-browser payload: the 386 tarball the guest VM
+# downloads on first boot, cross-compiled relay binaries (Task 2's wisp/TCP
+# bridge), and the pre-built boot artifacts. Triggered by a dedicated
+# `selfhost-v*` tag namespace so it never collides with the desktop/backend
+# `vX.Y.Z` tags the main `release.yml` workflow reacts to.
+on:
+  push:
+    tags:
+      - "selfhost-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    # Only run on the canonical fork this repo actually releases from.
+    # Mirrors release.yml's own fork guard; VerusFi (not multica-ai) is
+    # OUR remote here (`git remote -v`: origin = VerusFi/multica, upstream
+    # = multica-ai/multica) — a fork-of-this-fork pushing a `selfhost-v*`
+    # tag should not attempt to publish to its own (likely token-less or
+    # unintended) release history.
+    if: github.repository_owner == 'VerusFi'
+    runs-on: ubuntu-latest
+    env:
+      # Single source of truth for the asset list, shared by both publish
+      # steps below (the versioned snapshot and the rolling `selfhost-latest`
+      # channel) so they can never drift apart from each other.
+      # boot/vmlinuz + boot/initramfs.img are committed in-repo
+      # (build-boot.sh's output) and cheap to attach alongside the
+      # payload/relay assets, so provisioning artifacts ship from one place.
+      RELEASE_FILES: |
+        multica-selfhost-386.tar.gz
+        dist/multica-relay-darwin-arm64
+        dist/multica-relay-darwin-amd64
+        dist/multica-relay-linux-amd64
+        dist/multica-relay-linux-arm64
+        dist/multica-relay-windows-amd64.exe
+        deploy/selfhost-web/boot/vmlinuz
+        deploy/selfhost-web/boot/initramfs.img
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # go build (backend, GOARCH=386) and the relay cross-compile matrix
+      # below both need Go; pin it the same way the repo's own Go jobs do.
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # build-selfhost-tarball.sh is the source of truth for the payload: it
+      # cross-builds the Go backend for linux/386, builds the Next.js
+      # frontend (pnpm install + standalone build), then source-builds sharp
+      # and pgvector for the guest's exact Alpine/musl linux/386 target
+      # inside `--platform linux/386` containers. linux/386 is i386, the
+      # same CPU family as amd64, so the ubuntu-latest runner's kernel runs
+      # those containers natively -- no QEMU/binfmt setup needed.
+      - name: Build selfhost payload tarball
+        run: |
+          ./deploy/selfhost-web/build-selfhost-tarball.sh "$GITHUB_WORKSPACE/multica-selfhost-386.tar.gz"
+
+      # Cross-task contract with relay.sh / relay.ps1 (Task 16): those
+      # scripts derive an asset name from `uname`/$env:PROCESSOR_ARCHITECTURE
+      # and download it from this repo's latest release by that exact name.
+      # The five entries below must stay byte-for-byte in sync with both
+      # scripts' ASSET/$Asset case statements.
+      - name: Cross-compile relay binaries
+        working-directory: deploy/selfhost-web/relay
+        env:
+          CGO_ENABLED: 0
+        run: |
+          set -eu
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          declare -A targets=(
+            ["darwin/arm64"]="multica-relay-darwin-arm64"
+            ["darwin/amd64"]="multica-relay-darwin-amd64"
+            ["linux/amd64"]="multica-relay-linux-amd64"
+            ["linux/arm64"]="multica-relay-linux-arm64"
+            ["windows/amd64"]="multica-relay-windows-amd64.exe"
+          )
+          for target in "${!targets[@]}"; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            out="${targets[$target]}"
+            echo "Building $out ($goos/$goarch)"
+            GOOS="$goos" GOARCH="$goarch" go build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/dist/$out" .
+          done
+          ls -la "$GITHUB_WORKSPACE/dist"
+
+      # Publishes the immutable, versioned snapshot at the pushed
+      # `selfhost-vX.Y.Z` tag. `fail_on_unmatched_files: true` turns a
+      # missing asset (a glob matching nothing — e.g. the tarball build or
+      # one relay cross-compile silently produced no output) into a hard
+      # job failure instead of a release quietly published with fewer
+      # assets than the download scripts expect.
+      #
+      # `make_latest: false` is load-bearing, not cosmetic: GitHub's
+      # "latest release" is repo-wide, and this repo's ordinary
+      # `release.yml` (plain `vX.Y.Z` tags via GoReleaser) already claims
+      # it for the desktop/backend releases. relay.sh / relay.ps1 / the
+      # in-browser page all resolve their download URLs against a stable
+      # `selfhost-latest` tag instead (published in the next step) rather
+      # than `releases/latest/download/...`, precisely so the two release
+      # streams can never contend for that one repo-wide slot. See
+      # deploy/selfhost-web/dev/NOTES.md ("rolling selfhost-latest release
+      # channel") for the full writeup.
+      - name: Publish versioned release
+        uses: softprops/action-gh-release@v2
+        with:
+          make_latest: false
+          fail_on_unmatched_files: true
+          files: ${{ env.RELEASE_FILES }}
+
+      # Force-updates a second, rolling release pinned to the fixed tag
+      # `selfhost-latest` with the exact same assets. softprops/action-gh-
+      # release updates (rather than duplicates) a release whose tag
+      # already exists, and overwrites any asset whose filename already
+      # exists in it (`overwrite_files` defaults to true) — so this moves
+      # the `selfhost-latest` tag to the new commit and clobbers all 8
+      # assets with this run's build on every `selfhost-v*` tag push,
+      # giving relay.sh / relay.ps1 / vm-controller.js's default download
+      # URLs (`releases/download/selfhost-latest/<asset>`) a stable target
+      # that is immune to `release.yml`'s app releases claiming repo-wide
+      # "latest". Also `make_latest: false`: this tag is a download
+      # channel, not something that should show up as the repo's "Latest
+      # release" badge either.
+      - name: Publish rolling selfhost-latest release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: selfhost-latest
+          make_latest: false
+          fail_on_unmatched_files: true
+          files: ${{ env.RELEASE_FILES }}

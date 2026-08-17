@@ -1,0 +1,102 @@
+<!doctype html>
+<!--
+  Throwaway v86 boot-test harness for Task 6 (guest provisioning stage 1:
+  passphrase, LUKS, btrfs). NOT part of the shipped page. Combines
+  harness.html's networking plumbing (wisp:// relay, ../boot/vmlinuz +
+  ../boot/initramfs.img like harness-boot.html) with an empty 2 GiB disk
+  (hda) and a second serial port (uart1) for passphrase delivery, per the
+  Global Constraints passphrase contract: passphrase travels ONLY over
+  ttyS1, newline-terminated, never on ttyS0/cmdline/storage.
+
+  Empty-disk config note (see dev/NOTES.md "Task 6" section for the full
+  writeup): `hda: { buffer: new ArrayBuffer(2 * 1024 ** 3) }` (V86BufferImage)
+  would eagerly allocate the full 2 GiB as a JS ArrayBuffer up front. v86's
+  only other image forms (v86.d.ts: V86AsyncFileImage / V86SyncFileImage)
+  support demand-loading over HTTP Range requests when `async: true` + `size`
+  are given and `use_parts` is omitted (confirmed by reading the built
+  node_modules/v86/build/libv86.js: the `za` class backing this form issues
+  Range: bytes=start-end GETs on demand via `get()`, and writes
+  (`set()`) only ever land in an in-browser `block_cache` Map — never
+  written back to the server). So: `empty-disk.img` here is a real,
+  sparsely-allocated 2 GiB file (`truncate -s 2147483648`, 0 actual disk
+  blocks, verified with `du`), served by verify-luks.mjs's Range-aware
+  static server, and referenced as
+  `hda: { url: "../dev/empty-disk.img", async: true, size: 2 * 1024 ** 3 }`.
+  This is the "sparse/async empty image option" the task brief pointed at.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>selfhost-web verify-luks harness</title>
+</head>
+<body>
+<script src="node_modules/v86/build/libv86.js"></script>
+<script>
+  const ANSI_RE = /\x1b(\[[0-9;?]*[A-Za-z]|[78])/g;
+  const MAX_LOG = 400_000;
+
+  window.bootMarks = {};
+  window.serialLog = "";
+
+  let rawBuf = "";
+
+  function mark(name) {
+    if (!(name in window.bootMarks)) {
+      window.bootMarks[name] = Date.now();
+      console.log("[bootmark]", name, window.bootMarks[name]);
+    }
+  }
+
+  function onSerialByte(byte) {
+    rawBuf += String.fromCharCode(byte);
+    if (rawBuf.length > MAX_LOG) rawBuf = rawBuf.slice(-MAX_LOG / 2);
+    window.serialLog = rawBuf.replace(ANSI_RE, "");
+
+    // /init prints these itself, unprompted — not typed/echoed input, so no
+    // split-marker anti-echo trick needed (see dev/NOTES.md, Task 3 section).
+    if (/@@SH:phase:network@@/.test(window.serialLog)) mark("phase-network");
+    if (/@@SH:phase:luks@@/.test(window.serialLog)) mark("phase-luks");
+    if (/@@SH:err:/.test(window.serialLog)) {
+      const m = window.serialLog.match(/@@SH:err:([^@]*)@@/);
+      if (m) mark("err-" + m[1]);
+    }
+  }
+
+  // Send a shell command (with trailing newline) over ttyS0. The dropped-to
+  // shell after stage1 (test-only debug build, see dev/NOTES.md) is reached
+  // over the console (ttyS0/serial0), same as harness.html's sendCmd.
+  window.sendCmd = function sendCmd(cmd) {
+    window.emulator.serial0_send(cmd + "\n");
+  };
+
+  // Send the passphrase over ttyS1 (uart1) per the Global Constraints
+  // contract: newline-terminated, never on ttyS0/cmdline/storage.
+  // v86.d.ts: `serial_send_bytes(serial: number, data: Uint8Array): void`.
+  window.sendPassphrase = function sendPassphrase(pass) {
+    window.emulator.serial_send_bytes(1, new TextEncoder().encode(pass + "\n"));
+  };
+
+  mark("boot-start");
+
+  window.emulator = new V86({
+    wasm_path: "node_modules/v86/build/v86.wasm",
+    memory_size: 256 * 1024 * 1024,
+    vga_memory_size: 2 * 1024 * 1024,
+    bios: { url: "bios/seabios.bin" },
+    vga_bios: { url: "bios/vgabios.bin" },
+    bzimage: { url: "../boot/vmlinuz" },
+    initrd: { url: "../boot/initramfs.img" },
+    cmdline: "console=ttyS0,115200",
+    hda: { url: "empty-disk.img", async: true, size: 2 * 1024 * 1024 * 1024 },
+    uart1: true,
+    // Same relay port as harness.html/verify-net.mjs (18086) — see
+    // dev/NOTES.md re: 8086 already bound on this dev machine.
+    net_device: { type: "virtio", relay_url: "wisp://localhost:18086/" },
+    autostart: true,
+  });
+
+  window.emulator.add_listener("serial0-output-byte", onSerialByte);
+  window.emulator.add_listener("emulator-ready", () => mark("emulator-ready"));
+</script>
+</body>
+</html>

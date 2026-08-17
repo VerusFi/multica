@@ -1,0 +1,224 @@
+<!doctype html>
+<!--
+  Throwaway v86 boot-test harness for Task 8 (guest provisioning stage 3:
+  multica install, initdb, services — the capstone). Same plumbing as
+  dev/harness-install.html (Task 7): wisp:// relay, ttyS1 passphrase, empty
+  async-loaded 2 GiB disk. Adds:
+  - `sh_release_url=...` on the kernel cmdline, pointing at the locally
+    built payload tarball served by verify-firstboot.mjs's static server.
+    The host address is passed in via a `?release_host=` query param
+    (verify-firstboot.mjs computes it, see that file) rather than hardcoded
+    here — EMPIRICALLY CONFIRMED (see dev/NOTES.md "Task 8"): neither
+    `localhost` (short-circuited by the guest's OWN /etc/hosts, never
+    leaves the guest) nor `127.0.0.1` (same — guest-local loopback) nor a
+    guessed v86-internal gateway IP (`192.168.86.1`, `10.0.2.2` — the wisp
+    relay just does a literal `net.Dial(host, port)` with whatever
+    string/IP it's given; a raw IP that isn't one of the HOST machine's own
+    real addresses just fails to connect from the host's side) work. What
+    DOES work: the HOST machine's own real, non-loopback LAN IP address
+    (curl inside the guest treats it as a literal IP -> no local
+    resolution shortcut applies -> routed out via eth0/wisp as a raw-IP
+    CONNECT -> the relay's `net.Dial` reaches it directly, since it's a
+    real address bound to one of the host's own interfaces — a same-machine
+    self-connect to its own LAN IP, which routes correctly).
+  - marks for the two extra unprompted phase markers stage3_multica emits
+    (@@SH:phase:initdb@@ — @@SH:phase:download@@ is already tracked by
+    harness-install.html's pattern and reused here) plus
+    @@SH:phase:services@@ (emitted by init-selfhost itself, right before
+    switch_root) and @@SH:phase:ready@@ (emitted by the installed system's
+    own /etc/local.d/ready-marker.start, post-switch_root, once the
+    frontend answers on :3000).
+
+  Unlike Task 7's harness, NO natural debug-shell fallthrough exists once
+  stage3_multica is defined and succeeds — see dev/NOTES.md "Task 8" for
+  why a bare root shell on ttyS0 is enabled by stage3_multica itself
+  (same trust boundary as init-selfhost's own fail() path, documented
+  there with a security caveat). This harness sends the "curl -s
+  localhost:3000" probe over that ttyS0 shell after the ready marker,
+  exactly the same sendCmd/split-marker pattern verify-install.mjs used
+  for its post-stage2 psql probe.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>selfhost-web verify-firstboot harness</title>
+</head>
+<body>
+<script src="node_modules/v86/build/libv86.js"></script>
+<script>
+  const ANSI_RE = /\x1b(\[[0-9;?]*[A-Za-z]|[78])/g;
+  // Generous: the tarball download (~100M, over the relay from localhost —
+  // fast even under 386 emulation) + apk-installing 78 vips packages +
+  // full Postgres initdb/366 migrations + Next.js server output can be
+  // considerably chattier than Task 7's stage2_install log.
+  const MAX_LOG = 2_000_000;
+
+  window.bootMarks = {};
+  window.serialLog = "";
+
+  let rawBuf = "";
+
+  function mark(name) {
+    if (!(name in window.bootMarks)) {
+      window.bootMarks[name] = Date.now();
+      console.log("[bootmark]", name, window.bootMarks[name]);
+    }
+  }
+
+  function onSerialByte(byte) {
+    rawBuf += String.fromCharCode(byte);
+    if (rawBuf.length > MAX_LOG) rawBuf = rawBuf.slice(-MAX_LOG / 2);
+    window.serialLog = rawBuf.replace(ANSI_RE, "");
+
+    // /init and the installed system's local.d script print these
+    // unprompted — not typed/echoed input, so no split-marker anti-echo
+    // trick needed (see dev/NOTES.md, Task 3 section).
+    if (/@@SH:phase:network@@/.test(window.serialLog)) mark("phase-network");
+    if (/@@SH:phase:luks@@/.test(window.serialLog)) mark("phase-luks");
+    if (/@@SH:phase:install@@/.test(window.serialLog)) mark("phase-install");
+    if (/@@SH:phase:download@@/.test(window.serialLog)) mark("phase-download");
+    if (/@@SH:phase:initdb@@/.test(window.serialLog)) mark("phase-initdb");
+    if (/@@SH:phase:services@@/.test(window.serialLog)) mark("phase-services");
+    if (/@@SH:phase:ready@@/.test(window.serialLog)) mark("phase-ready");
+    if (/@@SH:err:/.test(window.serialLog)) {
+      const m = window.serialLog.match(/@@SH:err:([^@]*)@@/);
+      if (m) mark("err-" + m[1]);
+    }
+  }
+
+  // Send a shell command (with trailing newline) over ttyS0.
+  window.sendCmd = function sendCmd(cmd) {
+    window.emulator.serial0_send(cmd + "\n");
+  };
+
+  // Cold-boot support (Task 8 Step 4).
+  //
+  // FINDING (empirically confirmed, see dev/NOTES.md "Task 8" — RELEVANT TO
+  // TASK 11): v86's own `emulator.restart()` CANNOT be used to reboot a
+  // guest that was direct-kernel-booted via `bzimage`+`initrd` (which is
+  // exactly how this whole project boots — there is no bootloader and no MBR
+  // on the disk, it's raw LUKS). `restart()` calls `cpu.reboot_internal()`,
+  // which (read from node_modules/v86/build/libv86.js) does `reset_cpu()`,
+  // resets a few devices, and then `load_bios()` — and `load_bios()` ONLY
+  // re-writes the BIOS/VGA-BIOS ROM blobs back into memory. It does NOT
+  // re-run the Linux boot-protocol loader that placed the kernel, the
+  // initrd and the cmdline in memory at construction time. So after
+  // `restart()` the machine comes up as a bare SeaBIOS with nothing bootable
+  // anywhere, and dies almost immediately: `panicked at src/rust/cpu/cpu.rs:
+  // 815: Unimplemented: #GP handler`, with a stack of
+  // instr32_CA (RETF) -> far_return -> trigger_gp -> call_interrupt_vector.
+  // Confirmed on a run where the FIRST boot had just succeeded completely
+  // (VERDICT: FIRSTBOOT OK, HTML served on :3000) and the panic landed on
+  // the very next statement. Task 11 must not offer a "restart this
+  // instance" control backed by `emulator.restart()`.
+  //
+  // What is used instead: build a brand-new V86 instance — fresh CPU, fresh
+  // RAM, fresh devices, kernel/initrd/cmdline loaded from scratch — handing
+  // it the FIRST instance's own disk-buffer OBJECT as `hda`. v86's option
+  // normalization accepts an already-constructed loadable directly (its
+  // add_file equivalent branches on `r.get && r.set && r.load` before ever
+  // looking at `r.url`), and that object is where the async disk keeps every
+  // block the guest wrote — v86's async disks are copy-on-write in memory,
+  // empty-disk.img on the static server is never modified. So the second
+  // boot sees exactly the bytes the first boot left on the disk and nothing
+  // else.
+  //
+  // That is a stricter reading of "cold boot, no state restore" than
+  // `restart()` would have been, not a weaker one: nothing but the disk
+  // survives. Deliberately NOT save_state/restore_state (the task forbids
+  // state restore) and deliberately NOT a plain `new V86` with the original
+  // `{url: "empty-disk.img"}` (that would re-fetch a pristine disk and test
+  // nothing).
+  //
+  // Clears serialLog/bootMarks first so the second boot's assertions can't
+  // be satisfied by the FIRST boot's markers still sitting in the log —
+  // which would make the "no install/download this time" assertion
+  // vacuously false and the luks/services/ready ones vacuously true.
+  function findDiskBuffer(root) {
+    const seen = new Set();
+    const queue = [[root, 0]];
+    while (queue.length) {
+      const [obj, depth] = queue.shift();
+      if (!obj || typeof obj !== "object" || seen.has(obj) || depth > 4) continue;
+      seen.add(obj);
+      if (typeof obj.get === "function" && typeof obj.set === "function"
+          && typeof obj.load === "function" && obj.byteLength === DISK_SIZE) {
+        return obj;
+      }
+      for (const k of Object.keys(obj)) queue.push([obj[k], depth + 1]);
+    }
+    return null;
+  }
+
+  window.coldBootReset = async function coldBootReset() {
+    // Searched for structurally (get/set/load + exact byteLength) rather
+    // than by a fixed property path: libv86.js is a minified Closure build,
+    // so an internal path like cpu.devices.ide.master.buffer is not a stable
+    // contract across v86 versions. The byteLength check pins it to the hda
+    // we configured and rules out any other loadable that might exist.
+    const disk = findDiskBuffer(window.emulator.v86.cpu.devices);
+    if (!disk) throw new Error("cold boot: could not locate the hda disk buffer on the running emulator — cannot carry first-boot disk state into the second boot");
+    await window.emulator.stop();
+    rawBuf = "";
+    window.serialLog = "";
+    window.bootMarks = {};
+    window.emulator = new V86({ ...V86_OPTS, hda: disk });
+    window.emulator.add_listener("serial0-output-byte", onSerialByte);
+    window.emulator.add_listener("emulator-ready", () => mark("emulator-ready"));
+  };
+
+  // Send the passphrase over ttyS1 (uart1) per the Global Constraints
+  // passphrase contract: newline-terminated, never on ttyS0/cmdline/storage.
+  window.sendPassphrase = function sendPassphrase(pass) {
+    window.emulator.serial_send_bytes(1, new TextEncoder().encode(pass + "\n"));
+  };
+
+  mark("boot-start");
+
+  // See the file-level comment above / dev/NOTES.md "Task 8": the host
+  // address usable from INSIDE the guest is the host machine's own real
+  // LAN IP, not localhost/127.0.0.1/a guessed gateway. Passed in by
+  // verify-firstboot.mjs (which computes it via os.networkInterfaces())
+  // rather than hardcoded, so this harness isn't pinned to one dev
+  // machine's network.
+  const RELEASE_HOST = new URLSearchParams(location.search).get("release_host");
+  if (!RELEASE_HOST) throw new Error("harness-firstboot.html requires ?release_host=<host LAN IP>");
+
+  const DISK_SIZE = 2 * 1024 * 1024 * 1024;
+
+  // Everything except `hda`, so the cold-boot instance (see coldBootReset
+  // above) can be constructed identically apart from being handed the first
+  // instance's live disk buffer instead of the pristine empty-disk.img URL.
+  const V86_OPTS = {
+    wasm_path: "node_modules/v86/build/v86.wasm",
+    // Bumped from Task 7's 512 MiB: this stage runs Postgres (initdb +
+    // 366 migrations) AND, briefly, both the multica-backend and
+    // multica-web services concurrently (the latter a Next.js standalone
+    // server) once switch_root completes, in addition to everything
+    // Task 7 already needed.
+    memory_size: 1024 * 1024 * 1024,
+    vga_memory_size: 2 * 1024 * 1024,
+    bios: { url: "bios/seabios.bin" },
+    vga_bios: { url: "bios/vgabios.bin" },
+    bzimage: { url: "../boot/vmlinuz" },
+    initrd: { url: "../boot/initramfs.img" },
+    // sh_release_url points at verify-firstboot.mjs's static server, which
+    // also serves this harness page itself (same :18123 port as every
+    // earlier dev/verify-*.mjs) — reached here via the host's real LAN IP,
+    // see the RELEASE_HOST comment above.
+    cmdline: `console=ttyS0,115200 sh_release_url=http://${RELEASE_HOST}:18123/dev/multica-selfhost-386.tar.gz`,
+    uart1: true,
+    net_device: { type: "virtio", relay_url: "wisp://localhost:18086/" },
+    autostart: true,
+  };
+
+  window.emulator = new V86({
+    ...V86_OPTS,
+    hda: { url: "empty-disk.img", async: true, size: DISK_SIZE },
+  });
+
+  window.emulator.add_listener("serial0-output-byte", onSerialByte);
+  window.emulator.add_listener("emulator-ready", () => mark("emulator-ready"));
+</script>
+</body>
+</html>

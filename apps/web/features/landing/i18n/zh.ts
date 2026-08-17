@@ -10,6 +10,7 @@ export function createZhDict(allowSignup: boolean): LandingDict {
     docs: "\u6587\u6863",
     changelog: "\u66f4\u65b0\u65e5\u5fd7",
     useCases: "\u6848\u4f8b",
+    selfhost: "\u81ea\u6258\u7ba1",
     navigation: "\u4e3b\u5bfc\u822a",
     openMenu: "\u6253\u5f00\u5bfc\u822a\u83dc\u5355",
     closeMenu: "\u5173\u95ed\u5bfc\u822a\u83dc\u5355",

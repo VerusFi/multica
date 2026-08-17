@@ -1,0 +1,401 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>multica — self-hosted, in your browser</title>
+<meta name="description" content="Spin up a private multica instance entirely inside this browser tab, or deploy it on your own infrastructure.">
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #05070b;
+    --bg-raised: rgba(255, 255, 255, 0.04);
+    --border: rgba(255, 255, 255, 0.12);
+    --fg: rgba(255, 255, 255, 0.92);
+    --fg-muted: rgba(255, 255, 255, 0.64);
+    --fg-faint: rgba(255, 255, 255, 0.5);
+    --accent: #7ab8ff;
+    --btn-ghost-border: rgba(255, 255, 255, 0.18);
+    --btn-ghost-bg: rgba(0, 0, 0, 0.16);
+    --btn-ghost-bg-hover: rgba(0, 0, 0, 0.24);
+    --btn-solid-bg: #ffffff;
+    --btn-solid-bg-hover: rgba(255, 255, 255, 0.92);
+    --btn-solid-fg: #0a0d12;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+
+  a { color: inherit; }
+
+  main { display: block; }
+
+  /* ---------- Header ---------- */
+
+  .site-header {
+    position: relative;
+    z-index: 10;
+  }
+
+  .site-header .container {
+    margin: 0 auto;
+    max-width: 1320px;
+    height: 76px;
+    padding: 0 1.5rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1.5rem;
+  }
+
+  .wordmark {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.65rem;
+    text-decoration: none;
+    color: var(--fg);
+  }
+
+  .wordmark-icon {
+    display: inline-block;
+    width: 1.25rem;
+    height: 1.25rem;
+    background: currentColor;
+    clip-path: polygon(
+      45% 62.1%, 45% 100%, 55% 100%, 55% 62.1%,
+      81.8% 88.9%, 88.9% 81.8%, 62.1% 55%, 100% 55%,
+      100% 45%, 62.1% 45%, 88.9% 18.2%, 81.8% 11.1%,
+      55% 37.9%, 55% 0%, 45% 0%, 45% 37.9%,
+      18.2% 11.1%, 11.1% 18.2%, 37.9% 45%, 0% 45%,
+      0% 55%, 37.9% 55%, 11.1% 81.8%, 18.2% 88.9%
+    );
+  }
+
+  .wordmark-text {
+    font-size: 1.15rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: lowercase;
+  }
+
+  .actions {
+    display: flex;
+    align-items: center;
+    gap: 0.625rem;
+    flex-wrap: wrap;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    border-radius: 11px;
+    padding: 0.6rem 1rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+    border: 1px solid transparent;
+  }
+
+  .btn-ghost {
+    border-color: var(--btn-ghost-border);
+    background: var(--btn-ghost-bg);
+    color: var(--fg);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
+  .btn-ghost:hover { background: var(--btn-ghost-bg-hover); }
+
+  .btn-solid {
+    background: var(--btn-solid-bg);
+    color: var(--btn-solid-fg);
+  }
+  .btn-solid:hover { background: var(--btn-solid-bg-hover); }
+
+  /* ---------- Hero ---------- */
+
+  .hero {
+    position: relative;
+    overflow: hidden;
+    background:
+      radial-gradient(60% 55% at 50% -8%, rgba(122, 184, 255, 0.16), transparent 60%),
+      radial-gradient(80% 60% at 50% 100%, rgba(255, 255, 255, 0.05), transparent 55%),
+      var(--bg);
+  }
+
+  .hero .container {
+    margin: 0 auto;
+    max-width: 1120px;
+    padding: 4.5rem 1.5rem 5rem;
+    text-align: center;
+  }
+
+  .hero h1 {
+    margin: 0;
+    font-size: 2.75rem;
+    line-height: 1.05;
+    letter-spacing: -0.02em;
+    font-weight: 600;
+  }
+
+  @media (min-width: 640px) {
+    .hero h1 { font-size: 3.6rem; }
+  }
+
+  .hero p.lede {
+    max-width: 720px;
+    margin: 1.6rem auto 0;
+    color: var(--fg-muted);
+    font-size: 1.05rem;
+    line-height: 1.65;
+  }
+
+  .hero .cta-row {
+    margin-top: 2rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+  }
+
+  .hero .cta-row .btn {
+    padding: 0.75rem 1.3rem;
+    font-size: 0.98rem;
+  }
+
+  /* ---------- Highlights ---------- */
+
+  .highlights {
+    border-top: 1px solid var(--border);
+  }
+
+  .highlights .container {
+    margin: 0 auto;
+    max-width: 1120px;
+    padding: 3.5rem 1.5rem;
+    display: grid;
+    gap: 1rem;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  }
+
+  .highlight-card {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 1.4rem 1.5rem;
+  }
+
+  .highlight-card h3 {
+    margin: 0 0 0.5rem;
+    font-size: 1.02rem;
+    font-weight: 600;
+  }
+
+  .highlight-card p {
+    margin: 0;
+    color: var(--fg-muted);
+    font-size: 0.92rem;
+    line-height: 1.55;
+  }
+
+  /* ---------- Install ---------- */
+
+  .install {
+    border-top: 1px solid var(--border);
+  }
+
+  .install .container {
+    margin: 0 auto;
+    max-width: 760px;
+    padding: 3.5rem 1.5rem 4.5rem;
+  }
+
+  .install h2 {
+    margin: 0 0 0.6rem;
+    font-size: 1.6rem;
+    letter-spacing: -0.01em;
+  }
+
+  .install > .container > p {
+    margin: 0 0 1.75rem;
+    color: var(--fg-muted);
+    font-size: 0.96rem;
+    line-height: 1.6;
+  }
+
+  .cmd-label {
+    margin: 0 0 0.4rem;
+    font-size: 0.78rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--fg-faint);
+  }
+
+  .cmd-block {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    border: 1px solid var(--border);
+    background: var(--bg-raised);
+    border-radius: 12px;
+    padding: 0.75rem 0.9rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.86rem;
+  }
+
+  .cmd-block code {
+    flex: 1;
+    min-width: 0;
+    white-space: pre-wrap;
+    word-break: break-all;
+    color: var(--fg);
+  }
+
+  .copy-btn {
+    flex-shrink: 0;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--fg-muted);
+    border-radius: 8px;
+    padding: 0.35rem 0.65rem;
+    font: inherit;
+    font-size: 0.78rem;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .copy-btn:hover { color: var(--fg); border-color: var(--accent); }
+  .copy-btn[data-copied="true"] { color: var(--accent); border-color: var(--accent); }
+
+  /* ---------- Footer ---------- */
+
+  .site-footer {
+    border-top: 1px solid var(--border);
+  }
+
+  .site-footer .container {
+    margin: 0 auto;
+    max-width: 1120px;
+    padding: 2rem 1.5rem;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    color: var(--fg-faint);
+    font-size: 0.85rem;
+  }
+
+  .site-footer a { text-decoration: underline; text-underline-offset: 2px; }
+</style>
+</head>
+<body>
+
+<header class="site-header">
+  <div class="container">
+    <a href="./index.html" class="wordmark">
+      <span class="wordmark-icon" aria-hidden="true"></span>
+      <span class="wordmark-text">multica</span>
+    </a>
+    <nav class="actions" aria-label="Primary">
+      <a class="btn btn-ghost" href="https://github.com/VerusFi/multica/releases">Download</a>
+      <!-- data-configure-me: set once the hosted dashboard URL is known -->
+      <a class="btn btn-ghost" href="#" data-configure-me="dashboard-url">Dashboard</a>
+      <a class="btn btn-solid" href="./selfhost.html">Selfhost</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+  <section class="hero">
+    <div class="container">
+      <h1>Your own multica,<br>running right here.</h1>
+      <p class="lede">
+        A complete, private multica instance — launch it entirely inside this
+        browser tab, or run it on your own infrastructure with Docker
+        Compose, a single binary, or Kubernetes. Your data never leaves your
+        network.
+      </p>
+      <div class="cta-row">
+        <a class="btn btn-solid" href="./selfhost.html">Launch the browser demo</a>
+        <a class="btn btn-ghost" href="https://github.com/VerusFi/multica/releases">Download</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="highlights">
+    <div class="container">
+      <div class="highlight-card">
+        <h3>Self-host anywhere</h3>
+        <p>Run multica on your own infrastructure. Docker Compose, single binary, or Kubernetes — your data never leaves your network.</p>
+      </div>
+      <div class="highlight-card">
+        <h3>No vendor lock-in</h3>
+        <p>Bring your own LLM provider, swap agent backends, extend the API. You own the stack, top to bottom.</p>
+      </div>
+      <div class="highlight-card">
+        <h3>Transparent by default</h3>
+        <p>Every line of code is auditable. See exactly how your agents make decisions, how tasks are routed, and where your data flows.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="install">
+    <div class="container">
+      <h2>Prefer to run it yourself?</h2>
+      <p>Install the CLI on your own machine and bring up a full self-hosted stack.</p>
+
+      <p class="cmd-label">Install</p>
+      <div class="cmd-block">
+        <code id="cmd-install">curl -fsSL https://raw.githubusercontent.com/multica-ai/multica/main/scripts/install.sh | bash</code>
+        <button type="button" class="copy-btn" data-copy-target="cmd-install">Copy</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <div class="container">
+    <span>Self-hosting-in-a-browser-tab preview.</span>
+    <a href="https://github.com/VerusFi/multica">github.com/VerusFi/multica</a>
+  </div>
+</footer>
+
+<script>
+  // Copy-to-clipboard for the install command block above. Best-effort:
+  // clipboard access can be denied (permissions, non-secure context), in
+  // which case the command text is still visible and selectable.
+  document.querySelectorAll(".copy-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var targetId = btn.getAttribute("data-copy-target");
+      var codeEl = targetId && document.getElementById(targetId);
+      if (!codeEl) return;
+      var text = codeEl.textContent || "";
+      var done = function () {
+        var original = btn.textContent;
+        btn.textContent = "Copied";
+        btn.setAttribute("data-copied", "true");
+        setTimeout(function () {
+          btn.textContent = original;
+          btn.removeAttribute("data-copied");
+        }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () {});
+      }
+    });
+  });
+</script>
+</body>
+</html>

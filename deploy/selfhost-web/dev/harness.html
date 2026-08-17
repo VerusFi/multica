@@ -1,0 +1,83 @@
+<!doctype html>
+<!--
+  Throwaway v86 boot/networking verification harness. NOT part of the shipped
+  page (see deploy/selfhost-web/index.html for the real thing). Boots an
+  Alpine virt x86 ISO under v86, drives the serial console (ttyS0), and
+  exposes window.serialLog / window.bootMarks / window.sendCmd() so
+  verify-net.mjs (Playwright) can assert on guest networking through
+  multica-relay's wisp:// backend.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>selfhost-web verify harness</title>
+</head>
+<body>
+<script src="node_modules/v86/build/libv86.js"></script>
+<script>
+  // ANSI CSI/escape stripper, per the task brief.
+  const ANSI_RE = /\x1b(\[[0-9;?]*[A-Za-z]|[78])/g;
+  const MAX_LOG = 400_000; // cap retained raw bytes so long boots don't grow unbounded
+
+  window.bootMarks = {};
+  window.serialLog = "";
+
+  let rawBuf = "";
+  let loggedIn = false;
+
+  function mark(name) {
+    if (!(name in window.bootMarks)) {
+      window.bootMarks[name] = Date.now();
+      console.log("[bootmark]", name, window.bootMarks[name]);
+    }
+  }
+
+  function onSerialByte(byte) {
+    rawBuf += String.fromCharCode(byte);
+    if (rawBuf.length > MAX_LOG) rawBuf = rawBuf.slice(-MAX_LOG / 2);
+    window.serialLog = rawBuf.replace(ANSI_RE, "");
+
+    if (!loggedIn && /login:\s*$/.test(window.serialLog)) {
+      loggedIn = true;
+      mark("login-prompt");
+      // Alpine live/virt ISO defaults to passwordless root login.
+      setTimeout(() => window.emulator.serial0_send("root\n"), 300);
+    }
+    if (loggedIn && /localhost:~#\s*$/.test(window.serialLog)) {
+      mark("shell-ready");
+    }
+    // Extra marks purely for timing in dev/NOTES.md; not used by verify-net.mjs assertions.
+    if (/\bNET_UP\b/.test(window.serialLog)) mark("net-up");
+    if (/\bno lease\b/.test(window.serialLog)) mark("no-lease");
+    if (/\bAPK_NET_OK\b/.test(window.serialLog)) mark("apk-net-ok");
+  }
+
+  // Send a shell command (with trailing newline) to the guest over ttyS0.
+  window.sendCmd = function sendCmd(cmd) {
+    window.emulator.serial0_send(cmd + "\n");
+  };
+
+  mark("boot-start");
+
+  window.emulator = new V86({
+    wasm_path: "node_modules/v86/build/v86.wasm",
+    memory_size: 128 * 1024 * 1024,
+    vga_memory_size: 2 * 1024 * 1024,
+    bios: { url: "bios/seabios.bin" },
+    vga_bios: { url: "bios/vgabios.bin" },
+    bzimage: { url: "iso/boot/vmlinuz-virt" },
+    initrd: { url: "iso/boot/initramfs-virt" },
+    cmdline: "modules=loop,squashfs,sd-mod,usb-storage console=ttyS0,115200",
+    cdrom: { url: "alpine-virt-3.23.5-x86.iso" },
+    // NOTE: default port 8086 is already bound by an unrelated process on
+    // this dev machine (a Lima VM hostagent); verify-net.mjs runs the relay
+    // on 18086 instead and this file is kept in sync. See dev/NOTES.md.
+    net_device: { type: "virtio", relay_url: "wisp://localhost:18086/" },
+    autostart: true,
+  });
+
+  window.emulator.add_listener("serial0-output-byte", onSerialByte);
+  window.emulator.add_listener("emulator-ready", () => mark("emulator-ready"));
+</script>
+</body>
+</html>

@@ -1,0 +1,63 @@
+#!/sbin/openrc-run
+# OpenRC service for the multica backend API server (server/cmd/server).
+# Installed by stage3_multica (guest/provision.sh) into /mnt/etc/init.d/multica-backend
+# and shipped into the initramfs at /guest/multica-backend.initd via
+# build-boot.sh's mkinitfs features.d/selfhost.files list — see that file's
+# comments for why extra content has to be listed there to actually land in
+# the image (silent no-op otherwise).
+
+name="multica-backend"
+description="Multica backend API server"
+command="/opt/multica/backend/server"
+command_background="yes"
+pidfile="/run/${RC_SVCNAME}.pid"
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+directory="/opt/multica/backend"
+
+depend() {
+	need postgresql
+	need net
+	after postgresql
+}
+
+# start_pre runs in the same shell process that later hands the command off
+# to start-stop-daemon/supervise-daemon, so exported vars here are inherited
+# by the spawned server process — the standard OpenRC way to give a
+# command-based service its environment without a separate wrapper script.
+start_pre() {
+	export DATABASE_URL="postgres://multica:multica@127.0.0.1:5432/multica?sslmode=disable"
+	export PORT="8080"
+	export APP_ENV="production"
+	export MULTICA_APP_URL="http://localhost:3000"
+	# JWT_SECRET is generated once by stage3_multica (Task 8) into
+	# /opt/multica/env (`head -c32 /dev/urandom | base64`, mode 600) so it's
+	# stable across restarts/reboots instead of being re-rolled (and
+	# invalidating every session) on every service start.
+	#
+	# FAIL CLOSED. An earlier version of this file wrapped the sourcing in a
+	# bare `if [ -f /opt/multica/env ]`, so a missing or truncated env file
+	# started the server anyway with JWT_SECRET unset — and the server does
+	# not refuse to boot on that: it falls back to a hardcoded default
+	# signing key, which also derives the Composio state secret and the
+	# integration HMAC keys. That is a silently-insecure instance that looks
+	# perfectly healthy from the outside (OpenRC prints [ok], the API
+	# answers, tokens verify), which is the worst possible failure mode for
+	# a secret. Refuse to start instead: an instance that does not come up
+	# is a visible, diagnosable problem, and the ready-marker gate will
+	# catch it. Both the file's existence and the variable's actual value
+	# are checked — sourcing a file that exists but never assigns
+	# JWT_SECRET (partial write, truncated by a crash mid-provision) would
+	# otherwise sail straight through the -f test.
+	if [ ! -f /opt/multica/env ]; then
+		eerror "/opt/multica/env is missing — refusing to start without JWT_SECRET"
+		eerror "(it is generated once by stage3_multica during provisioning)"
+		return 1
+	fi
+	. /opt/multica/env
+	if [ -z "${JWT_SECRET}" ]; then
+		eerror "/opt/multica/env does not set JWT_SECRET — refusing to start with the server's insecure default signing key"
+		return 1
+	fi
+	export JWT_SECRET
+}

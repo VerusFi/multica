@@ -1,0 +1,180 @@
+<!doctype html>
+<!--
+  Throwaway manual/driven check for Task 11 (js/vm-controller.js) and Task 12
+  (js/console.js). NOT part of the shipped page (selfhost.html, still Task
+  13's placeholder, is left untouched). Instantiates the REAL VmController
+  class against the real vendored boot artifacts and a real relay — this is
+  not a reimplementation of the harness pattern, it is the shipped module
+  under test.
+
+  Path note: vm-controller.js hardcodes its v86 asset paths relative to
+  wherever the page that constructs VmController live (`vendor/v86.wasm`,
+  `boot/vmlinuz`, no `../`) — matching the real shipped page
+  (`selfhost.html`), which will sit at the repo root alongside `vendor/` and
+  `boot/`. This file physically lives one level down, in `dev/`, so
+  `dev/verify-vmc.mjs`'s static server serves this file's content AT the
+  root path ("/") rather than at "/dev/vm-controller-check.html" — same
+  reasoning as the Task 4 finding recorded in dev/NOTES.md about a page's
+  effective base URL depending on the navigated URL, not the file's location
+  on disk, just applied in the opposite direction (Task 4 needed base
+  "/dev/"; this page needs base "/").
+
+  window.makeController(id, label) supports multiple independent
+  VmController instances in the same page — needed by verify-vmc.mjs's
+  autosave-coherence check (Task 11 review finding), which constructs a
+  fresh controller over the SAME instance id after simulating an unclean
+  shutdown, exactly as a real page reload would. `window.vmc`/`phases`/
+  `errors`/`states`/`marks` remain as plain aliases into
+  `controllers.main` so the original pause/resume check keeps working
+  unmodified.
+
+  Task 12: attachConsole(containerEl, vmController) is instantiated and wired
+  to the main controller's serial I/O; window.console global is replaced with
+  the terminal for interactive testing. window.getSerialBuffer() and
+  window.findSerialMarker() provide inspection hooks for verification.
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>vm-controller check</title>
+<link rel="stylesheet" href="/vendor/xterm.css">
+<style>
+  body {
+    font-family: monospace;
+    margin: 0;
+    padding: 10px;
+  }
+  #console {
+    border: 1px solid #ccc;
+    width: 100%;
+    height: 400px;
+    margin-top: 10px;
+  }
+</style>
+</head>
+<body>
+<!-- Classic (non-module) scripts for UMD libraries: libv86.js and xterm.js.
+     Both are UMD-style builds that set window.V86 and window.Terminal, not ES modules.
+     Module scripts are deferred until after parsing regardless of position,
+     so these only need to appear somewhere before the modules that use them
+     (vm-controller.js calls `new V86(...)`, console.js calls `new Terminal(...)`). -->
+<script src="/vendor/libv86.js"></script>
+<script src="/vendor/xterm.js"></script>
+
+<div id="console"></div>
+<script type="module">
+  import { VmController } from "/js/vm-controller.js";
+  import { attachConsole } from "/js/console.js";
+
+  window.controllers = {};
+  // Store attachConsole for use in helper below.
+  window._attachConsoleImpl = attachConsole;
+
+  // Buffer to capture all serial output for verification.
+  window.serialBuffer = "";
+
+  window.makeController = function makeController(instanceId, label, passphrase = "test-passphrase-task11") {
+    const rec = { phases: [], errors: [], states: [], marks: {} };
+    const t0 = Date.now();
+    const mark = (name) => {
+      if (!(name in rec.marks)) rec.marks[name] = Date.now() - t0;
+    };
+    mark("check-start");
+
+    const instance = {
+      id: instanceId,
+      name: label,
+      diskSizeGB: 2,
+      relayUrl: "wisp://localhost:18086/",
+      createdAt: t0,
+      provisioned: false,
+    };
+
+    rec.instance = instance;
+    rec.vmc = new VmController({
+      instance,
+      passphrase,
+      onPhase: (name) => {
+        rec.phases.push(name);
+        mark("phase-" + name);
+      },
+      onError: (msg) => {
+        rec.errors.push(msg);
+        mark("err-" + rec.errors.length + "-" + msg);
+      },
+      onSerial: (ch) => {
+        // Capture all serial output for verification hooks.
+        window.serialBuffer += ch;
+      },
+      onStateChange: (state) => {
+        rec.states.push(state);
+        mark("state-" + state + "-" + rec.states.length);
+      },
+    });
+
+    window.controllers[label] = rec;
+    return rec;
+  };
+
+  // Phase 1 (original pause/resume check): "main" controller, plus the
+  // pre-existing flat globals as aliases so that part of the driver is
+  // unchanged.
+  const main = window.makeController("vmc-check-1", "main");
+  window.vmc = main.vmc;
+  window.phases = main.phases;
+  window.errors = main.errors;
+  window.states = main.states;
+  window.marks = main.marks;
+
+  // Driven explicitly by verify-vmc.mjs, not auto-started, so the driver
+  // controls timing/ordering the same way verify-*.mjs scripts already do
+  // for the harness-*.html pages.
+  window.startVm = () => window.vmc.start();
+  window.pauseVm = () => window.vmc.pause();
+  window.resumeVm = () => window.vmc.resume();
+
+  // Evidence helper for the driver: reads the persisted snapshot straight
+  // out of IndexedDB via Task 10's own loadSnapshot, independent of
+  // VmController, to confirm pause()/autosave actually wrote something
+  // durable. Parameterized by instance id (defaults to the "main"
+  // controller's) so the coherence check can inspect its own instance too.
+  window.getSnapshotSize = async (instanceId = main.instance.id) => {
+    const { loadSnapshot } = await import("/js/instance-manager.js");
+    const buf = await loadSnapshot(instanceId);
+    return buf ? buf.byteLength : null;
+  };
+
+  // Task 12 console verification helpers.
+  // Attach the console to the main controller on demand (called by the driver).
+  // Uses the REAL attachConsole from /js/console.js (imported above).
+  window.attachConsoleToMain = () => {
+    const containerEl = document.getElementById("console");
+    if (!containerEl) throw new Error("Console container #console not found");
+    const result = window._attachConsoleImpl(containerEl, main.vmc);
+    main.consoleDispose = result.dispose;
+    main.consoleTerminal = result.terminal; // Store terminal instance for testing.
+    return result;
+  };
+
+  // Basic serial buffer search helper. Simple substring match; does NOT
+  // implement split-marker discipline itself. The verification driver
+  // (verify-console.mjs) uses a spy on vmController.sendToConsole to prove
+  // the input chain (term.paste → term.onData → dataListener → sendToConsole),
+  // avoiding serial-buffer echo inspection entirely. This helper remains
+  // available for other potential test drivers.
+  window.findSerialMarker = (marker) => {
+    return window.serialBuffer.includes(marker);
+  };
+
+  // Get the full serial buffer for inspection.
+  window.getSerialBuffer = () => {
+    return window.serialBuffer;
+  };
+
+  // Clear the serial buffer (useful between test runs).
+  window.clearSerialBuffer = () => {
+    window.serialBuffer = "";
+  };
+</script>
+</body>
+</html>

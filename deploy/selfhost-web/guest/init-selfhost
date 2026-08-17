@@ -1,0 +1,75 @@
+#!/bin/sh
+# initramfs /init for selfhost instances.
+# Boot contract: passphrase arrives on /dev/ttyS1 (newline-terminated);
+# progress markers go to /dev/console (ttyS0) as @@SH:phase:<name>@@.
+#
+# Adaptation from the task brief, documented per Task 4's NOTES.md finding
+# ("Finding for Tasks 6-8: no busybox applet symlinks in this initramfs"):
+# this initramfs (built by build-boot.sh via mkinitfs) ships NO busybox
+# applet symlinks — only the small set of standalone binaries each
+# features.d/*.files entry lists (apk.static, cryptsetup, btrfs, mkfs.btrfs,
+# modprobe) exist as real files, under /sbin. Bare `mount`, `ip`, `udhcpc`,
+# `head`, `switch_root` (busybox multicall applets with no symlink) are
+# consequently NOT on PATH and fail with "not found" (confirmed in Task 4's
+# boot test). Fix applied here: set PATH explicitly, then
+# `busybox --install -s /bin` as the very first real action, targeting
+# /bin only (not /sbin) so the real /sbin binaries already shipped
+# (cryptsetup, btrfs, mkfs.btrfs, apk.static, modprobe) are not shadowed by
+# busybox's own same-named applets.
+export PATH=/bin:/sbin:/usr/bin:/usr/sbin
+# Must be invoked by absolute path: busybox --install determines where to
+# point its symlinks from argv[0], and refuses ("'busybox' is not an
+# absolute path") if it was found via a bare PATH lookup rather than given
+# an absolute path directly (found empirically boot-testing this file —
+# with a bare `busybox` call here, the symlinks were silently never
+# created and every subsequent bare applet call still failed "not found").
+/bin/busybox --install -s /bin
+
+mount -t proc none /proc
+mount -t sysfs none /sys
+mount -t devtmpfs none /dev
+
+mark() { echo "@@SH:phase:$1@@" > /dev/console; }
+fail() { echo "@@SH:err:$1@@" > /dev/console; exec /bin/sh; }
+
+. /guest/provision.sh
+
+# NOTE: v86 has no virtio block device (v86.d.ts audit: only virtio net/
+# console/balloon/9p exist) — the disk attached as `hda` enumerates via
+# IDE/ATA (ata_piix, builtin/auto-probed by this kernel) as /dev/sda, not
+# /dev/vda. See guest/provision.sh for the full writeup; modprobe'ing
+# virtio_blk here is consequently a harmless no-op kept only in case a
+# future non-v86 target actually exposes one.
+# sd_mod (the SCSI disk driver that actually creates the /dev/sda block
+# device node from the SCSI-transport disk libata/ata_piix registers) is
+# NOT auto-loaded by this stripped initramfs — there's no udev/mdev running
+# uevent-triggered module autoloading the way a full Alpine boot has via
+# nlplug-findfs. Confirmed empirically: without an explicit `modprobe
+# sd_mod`, dmesg shows the disk recognized at the SCSI transport layer
+# ("scsi 0:0:0:0: Direct-Access ...") but /proc/partitions and
+# /sys/class/block stay empty and cryptsetup fails "Device /dev/sda does
+# not exist". build-boot.sh's mkinitfs features= list was also missing the
+# "scsi" feature entirely (only "ata" was listed, which is IDE/ATA
+# transport only, not the SCSI disk block driver — see that script for the
+# matching fix) until this was found.
+for m in virtio_blk virtio_net dm-crypt btrfs sd_mod; do modprobe "$m" 2>/dev/null || true; done
+
+mark network
+ip link set lo up
+ip link set eth0 up
+udhcpc -i eth0 -t 12 -n || fail "dhcp-failed"
+
+PASS="$(head -n1 /dev/ttyS1)" || fail "no-passphrase"
+[ -n "$PASS" ] || fail "empty-passphrase"
+
+if cryptsetup isLuks /dev/sda; then
+  coldboot_mount "$PASS" || fail "luks-open-failed"
+else
+  stage1_disk "$PASS"    || fail "disk-setup-failed"
+  stage2_install         || fail "install-failed"
+  stage3_multica         || fail "multica-failed"
+fi
+
+mark services
+umount /proc /sys
+exec switch_root /mnt /sbin/init

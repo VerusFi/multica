@@ -1,0 +1,67 @@
+<!doctype html>
+<!--
+  Throwaway v86 boot-artifact verification harness (Task 4). NOT part of the
+  shipped page. Unlike harness.html (Task 3, ISO + cdrom + WISP networking),
+  this variant points v86 directly at the committed boot artifacts
+  (../boot/vmlinuz, ../boot/initramfs.img) with NO cdrom, to prove the
+  initramfs built by build-boot.sh boots on its own and its skeleton /init
+  (guest/init-selfhost) runs and prints its marker. Exposes
+  window.serialLog / window.bootMarks for verify-boot.mjs (Playwright).
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<title>selfhost-web verify-boot harness</title>
+</head>
+<body>
+<script src="node_modules/v86/build/libv86.js"></script>
+<script>
+  // ANSI CSI/escape stripper, same as harness.html.
+  const ANSI_RE = /\x1b(\[[0-9;?]*[A-Za-z]|[78])/g;
+  const MAX_LOG = 400_000;
+
+  window.bootMarks = {};
+  window.serialLog = "";
+
+  let rawBuf = "";
+
+  function mark(name) {
+    if (!(name in window.bootMarks)) {
+      window.bootMarks[name] = Date.now();
+      console.log("[bootmark]", name, window.bootMarks[name]);
+    }
+  }
+
+  function onSerialByte(byte) {
+    rawBuf += String.fromCharCode(byte);
+    if (rawBuf.length > MAX_LOG) rawBuf = rawBuf.slice(-MAX_LOG / 2);
+    window.serialLog = rawBuf.replace(ANSI_RE, "");
+
+    // init-selfhost (guest/init-selfhost) prints this itself, unprompted —
+    // it is not typed/echoed input, so no split-marker anti-echo trick is
+    // needed here (see dev/NOTES.md re: verify-net.mjs's NET_UP/APK_NET_OK
+    // false-positive trap, which only applies to markers embedded in a
+    // *typed* command that the guest tty echoes back).
+    if (/@@SH:phase:network@@/.test(window.serialLog)) mark("phase-network");
+  }
+
+  mark("boot-start");
+
+  window.emulator = new V86({
+    wasm_path: "node_modules/v86/build/v86.wasm",
+    memory_size: 128 * 1024 * 1024,
+    vga_memory_size: 2 * 1024 * 1024,
+    bios: { url: "bios/seabios.bin" },
+    vga_bios: { url: "bios/vgabios.bin" },
+    bzimage: { url: "../boot/vmlinuz" },
+    initrd: { url: "../boot/initramfs.img" },
+    cmdline: "console=ttyS0,115200",
+    // No cdrom: this harness proves the initramfs boots standalone.
+    autostart: true,
+  });
+
+  window.emulator.add_listener("serial0-output-byte", onSerialByte);
+  window.emulator.add_listener("emulator-ready", () => mark("emulator-ready"));
+</script>
+</body>
+</html>
