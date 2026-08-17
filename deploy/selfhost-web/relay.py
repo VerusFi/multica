@@ -16,6 +16,7 @@ two things standing between "the guest in your own tab" and "anyone else"
 are the listen address and the WebSocket Origin check below. Both default
 to the tightest setting that still lets the shipped page work.
 """
+import argparse
 import asyncio
 import base64
 import fnmatch
@@ -289,3 +290,229 @@ class WSConn:
             if fin:
                 return bytes(message)
             in_fragments = True
+
+
+# --- WISP sessions ----------------------------------------------------------
+
+
+class TCPStream:
+    def __init__(self, writer):
+        self._writer = writer
+
+    async def write(self, data):
+        self._writer.write(data)
+        await self._writer.drain()
+
+    def close(self):
+        self._writer.close()
+
+
+class UDPStream:
+    def __init__(self, transport):
+        self._transport = transport
+
+    async def write(self, data):
+        self._transport.sendto(data)
+
+    def close(self):
+        self._transport.close()
+
+
+class Session:
+    """One WebSocket client and its open streams."""
+
+    def __init__(self, ws):
+        self.ws = ws
+        self.streams = {}  # stream id -> TCPStream | UDPStream
+        self.tasks = set()
+
+    def track(self, task):
+        # asyncio holds only weak references to tasks; keep them alive.
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
+
+    async def send_frame(self, frame_type, stream_id, payload):
+        try:
+            await self.ws.send_message(encode_frame(frame_type, stream_id, payload))
+        except (WSClosed, ConnectionError, OSError):
+            pass
+
+    async def close_stream(self, stream_id, reason):
+        stream = self.streams.pop(stream_id, None)
+        if stream is not None:
+            stream.close()
+        await self.send_frame(TYPE_CLOSE, stream_id, bytes([reason]))
+
+
+async def pump_tcp(session, stream_id, reader):
+    """Copy target->client until EOF/error, then CLOSE(0x02) the stream —
+    the same lifecycle as the Go relay's per-stream read goroutine."""
+    try:
+        while True:
+            data = await reader.read(32 * 1024)
+            if not data:
+                break
+            await session.send_frame(TYPE_DATA, stream_id, data)
+    except (ConnectionError, OSError):
+        pass
+    await session.close_stream(stream_id, CLOSE_GENERIC)
+
+
+class UDPRelayProtocol(asyncio.DatagramProtocol):
+    def __init__(self, session, stream_id, loop):
+        self._session = session
+        self._stream_id = stream_id
+        self._loop = loop
+
+    def datagram_received(self, data, addr):
+        self._session.track(self._loop.create_task(
+            self._session.send_frame(TYPE_DATA, self._stream_id, data)))
+
+    def error_received(self, exc):
+        self._session.track(self._loop.create_task(
+            self._session.close_stream(self._stream_id, CLOSE_GENERIC)))
+
+
+async def open_stream(session, stream_id, payload):
+    try:
+        stream_type, port, host = parse_connect(payload)
+    except ValueError:
+        await session.close_stream(stream_id, CLOSE_INVALID_PAYLOAD)
+        return
+    loop = asyncio.get_running_loop()
+    try:
+        if stream_type == 0x02:  # UDP
+            transport, _ = await loop.create_datagram_endpoint(
+                lambda: UDPRelayProtocol(session, stream_id, loop),
+                remote_addr=(host, port))
+            session.streams[stream_id] = UDPStream(transport)
+        else:  # TCP. Hostnames resolve here, relay-side, like Go's net.Dial —
+            # the guest's DNS-by-hostname CONNECTs depend on this.
+            reader, writer = await asyncio.open_connection(host, port)
+            session.streams[stream_id] = TCPStream(writer)
+            session.track(loop.create_task(pump_tcp(session, stream_id, reader)))
+    except OSError:
+        await session.close_stream(stream_id, CLOSE_CONNECT_FAILED)
+
+
+async def handle_connection(reader, writer, patterns):
+    if not await perform_handshake(reader, writer, patterns):
+        writer.close()
+        return
+    ws = WSConn(reader, writer)
+    session = Session(ws)
+    await session.send_frame(TYPE_CONTINUE, 0, continue_payload(INITIAL_BUFFER))
+    try:
+        while True:
+            try:
+                message = await ws.recv_message()
+            except WSClosed:
+                break
+            try:
+                frame_type, stream_id, payload = decode_frame(message)
+            except ValueError:
+                continue  # malformed frame: ignored, session stays up
+            if frame_type == TYPE_CONNECT:
+                await open_stream(session, stream_id, payload)
+            elif frame_type == TYPE_DATA:
+                stream = session.streams.get(stream_id)
+                if stream is None:
+                    continue
+                try:
+                    await stream.write(payload)
+                except (ConnectionError, OSError):
+                    await session.close_stream(stream_id, CLOSE_GENERIC)
+                else:
+                    await session.send_frame(
+                        TYPE_CONTINUE, stream_id, continue_payload(INITIAL_BUFFER))
+            elif frame_type == TYPE_CLOSE:
+                await session.close_stream(stream_id, CLOSE_GENERIC)
+    finally:
+        for task in list(session.tasks):
+            task.cancel()
+        for stream in list(session.streams.values()):
+            stream.close()
+        session.streams.clear()
+        writer.close()
+
+
+# --- CLI --------------------------------------------------------------------
+
+# Loopback, NOT ":8086" (all interfaces): a relay on all interfaces is an
+# open proxy for every host on the user's LAN. Loopback costs the intended
+# flow nothing — the relay dials *outward* regardless of what it binds, and
+# the only client that needs to reach it is a browser on this machine.
+DEFAULT_LISTEN = "127.0.0.1:8086"
+
+
+def parse_listen(value):
+    """Go-style listen addresses: "127.0.0.1:8086", ":18086" (all
+    interfaces), "[::1]:8086". Returns (host_or_None, port)."""
+    host, sep, port = value.rpartition(":")
+    if not sep:
+        raise ValueError("listen address must be host:port or :port")
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    return (host or None), int(port)
+
+
+def build_arg_parser():
+    parser = argparse.ArgumentParser(
+        prog="multica-relay",
+        description="WISP v1 relay for the multica in-browser selfhost page "
+                    "(single file, stdlib only).")
+    # Single-dash option strings on purpose: this file replaced a Go binary
+    # whose flags were -listen / -origin / -allow-any-origin, and relay.sh,
+    # the README, and shell history still pass them in that form.
+    parser.add_argument(
+        "-listen", "--listen", default=DEFAULT_LISTEN,
+        help="listen address (defaults to loopback: this is an unauthenticated "
+             "proxy, binding all interfaces exposes it to your whole LAN)")
+    parser.add_argument(
+        "-origin", "--origin", action="append", default=[],
+        help="additional allowed browser origin, host[:port] or full URL; "
+             "repeatable and comma-separated (e.g. -origin https://owner.github.io)")
+    parser.add_argument(
+        "-allow-any-origin", "--allow-any-origin", action="store_true",
+        dest="allow_any_origin",
+        help="accept WebSockets from ANY origin — any website open in another "
+             "tab can then use this relay as a proxy; last resort only")
+    return parser
+
+
+async def run(args):
+    if args.allow_any_origin:
+        patterns = ["*"]
+        log.warning("WARNING: -allow-any-origin is set: any website in any tab "
+                    "can use this relay as an unauthenticated proxy from this machine")
+    else:
+        patterns = DEFAULT_ORIGIN_PATTERNS + parse_origin_flag(args.origin)
+    host, port = parse_listen(args.listen)
+    server = await asyncio.start_server(
+        lambda r, w: handle_connection(r, w, patterns), host, port)
+    bound = server.sockets[0].getsockname()
+    # Log the *actual* bound address (not the flag) so `-listen 127.0.0.1:0`
+    # is usable and the startup line is always truthful.
+    log.info("multica-relay (WISP v1) listening on %s:%d (allowed origins: %s)",
+             bound[0], bound[1], " ".join(patterns))
+    async with server:
+        await server.serve_forever()
+
+
+def main(argv=None):
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+    args = build_arg_parser().parse_args(argv)
+    try:
+        asyncio.run(run(args))
+    except KeyboardInterrupt:
+        pass
+    except OSError as exc:
+        # Most commonly: the port is already taken by another relay.
+        raise SystemExit(
+            "ERROR: could not listen on %s: %s. Is another relay already "
+            "running? Try a different port, e.g. -listen 127.0.0.1:8087."
+            % (args.listen, exc))
+
+
+if __name__ == "__main__":
+    main()

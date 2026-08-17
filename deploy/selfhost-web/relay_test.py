@@ -225,5 +225,42 @@ class PerformHandshakeTest(unittest.TestCase):
         self.assertIn(b"101 Switching Protocols", response)
 
 
+class ParseListenTest(unittest.TestCase):
+    def test_host_and_port(self):
+        self.assertEqual(relay.parse_listen("127.0.0.1:8086"), ("127.0.0.1", 8086))
+
+    def test_empty_host_means_all_interfaces(self):
+        # The smoke test and dev harnesses pass ":18086", Go-style.
+        self.assertEqual(relay.parse_listen(":18086"), (None, 18086))
+
+    def test_bracketed_ipv6(self):
+        self.assertEqual(relay.parse_listen("[::1]:8086"), ("::1", 8086))
+
+    def test_missing_port_rejected(self):
+        with self.assertRaises(ValueError):
+            relay.parse_listen("8086")
+
+
+class ArgParserTest(unittest.TestCase):
+    def test_go_style_single_dash_flags(self):
+        args = relay.build_arg_parser().parse_args(
+            ["-listen", ":18086",
+             "-origin", "https://a.example, b.example:8080",
+             "-origin", "c.example"])
+        self.assertEqual(args.listen, ":18086")
+        self.assertEqual(relay.parse_origin_flag(args.origin),
+                         ["a.example", "b.example:8080", "c.example"])
+        self.assertFalse(args.allow_any_origin)
+
+    def test_allow_any_origin_flag(self):
+        args = relay.build_arg_parser().parse_args(["-allow-any-origin"])
+        self.assertTrue(args.allow_any_origin)
+
+    def test_defaults(self):
+        args = relay.build_arg_parser().parse_args([])
+        self.assertEqual(args.listen, relay.DEFAULT_LISTEN)
+        self.assertEqual(args.origin, [])
+
+
 if __name__ == "__main__":
     unittest.main()
