@@ -38,7 +38,8 @@
 | `.github/workflows/selfhost-release.yml` | Modify — drop relay cross-compile and assets |
 | `.github/workflows/selfhost-pages.yml` | Modify — stop excluding `relay/`, exclude `relay_test.py` |
 | `.github/workflows/selfhost-relay-tests.yml` | Create — conformance CI on ubuntu + windows |
-| `deploy/selfhost-web/README.md`, `deploy/selfhost-web/dev/NOTES.md` | Modify — script-only relay docs |
+| `deploy/selfhost-web/README.md`, `deploy/selfhost-web/dev/NOTES.md` | Modify — script-only relay docs + public-relay note |
+| `deploy/selfhost-web/js/ui.js` (again), `deploy/selfhost-web/selfhost.html`, `deploy/selfhost-web/tests/ui.spec.mjs` | Modify — "Test connection" button + WISP-greeting validation |
 
 ---
 
@@ -2204,6 +2205,21 @@ nothing else is downloaded.
 
 The "Who can reach the relay" block that follows stays; in it, change "Equivalent flags on the binary:" to "Equivalent flags on the relay:".
 
+- [ ] **Step 3b: README — public WISP relay option**
+
+After the `wss://` constraint block (before "Local usage without Pages"), add:
+
+```markdown
+**Using a public relay instead of running your own.** The "Relay address"
+field accepts any WISP v1 endpoint (`wisp://`, or `ws://` / `wss://`), not
+just a relay on your own machine — a hosted WISP server works with no change
+here, and the page's **Test connection** button confirms it before you
+create an instance. The trade-off is real: a third-party relay dials every
+outbound connection on your guest's behalf and therefore sees all of that
+egress (which hosts, when). For anything sensitive, run your own relay
+locally; treat a public relay as a convenience for throwaway trials.
+```
+
 - [ ] **Step 4: README — "Local usage without Pages" (lines ~175–177)**
 
 Change `(or build one locally: `cd relay && go build -o multica-relay .`, matching what `relay.sh` downloads)` to `(or run it straight from the checkout: `python3 relay.py`)`.
@@ -2236,6 +2252,162 @@ git commit -m "docs(selfhost): script-only relay docs"
 
 ---
 
+### Task 11: "Test connection" button with WISP-greeting validation
+
+**Files:**
+- Modify: `deploy/selfhost-web/js/ui.js` (`preflightRelay`, ~lines 84–126; element collection ~line 391; a new wiring function)
+- Modify: `deploy/selfhost-web/selfhost.html` (relay field, ~lines 190–195)
+- Modify: `deploy/selfhost-web/tests/ui.spec.mjs`
+
+**Interfaces:**
+- Consumes: the WISP greeting contract — a compliant WISP v1 server sends `CONTINUE` (type `0x03`) on stream `0` immediately after the WebSocket opens (relay.py does this in `handle_connection`; so does any WISP v1 server and v86's own).
+- Produces: `preflightRelay(relayUrl, timeoutMs)` now resolves only after that greeting (rejects a plain WebSocket that never sends it); a new `wireTestConnection(els, doc)` bound to a `#btn-test-connection` button that shows pending/success/failure inline.
+
+- [ ] **Step 1: Write the failing test**
+
+Add to `deploy/selfhost-web/tests/ui.spec.mjs` (inside the exported `run()`, alongside the other assertions; it uses a real in-page WebSocket server via a data: URL is not possible, so drive `preflightRelay` against a tiny mock by monkey-patching `WebSocket` in the page context):
+
+```js
+// --- preflightRelay requires a WISP CONTINUE greeting, not just an open socket ---
+await page.evaluate(async () => {
+  const { preflightRelay } = await import("../js/ui.js");
+  const RealWS = window.WebSocket;
+
+  // A fake WebSocket whose behavior is chosen by the URL query.
+  class FakeWS {
+    constructor(url) {
+      this.url = url;
+      this.binaryType = "blob";
+      this.onopen = this.onerror = this.onmessage = this.onclose = null;
+      setTimeout(() => {
+        this.onopen && this.onopen();
+        if (url.includes("greet")) {
+          // WISP CONTINUE on stream 0: [0x03][0,0,0,0][buffer uint32]
+          const buf = new Uint8Array([0x03, 0, 0, 0, 0, 128, 0, 0, 0]);
+          this.onmessage && this.onmessage({ data: buf.buffer });
+        }
+        // "nogreet": opens but never sends a frame -> must time out/reject.
+      }, 0);
+    }
+    close() {}
+  }
+  window.WebSocket = FakeWS;
+  try {
+    let greeted = false;
+    await preflightRelay("wisp://localhost/greet", 500).then(() => (greeted = true));
+    if (!greeted) throw new Error("a WISP greeting should resolve preflightRelay");
+
+    let rejected = false;
+    await preflightRelay("wisp://localhost/nogreet", 300).catch(() => (rejected = true));
+    if (!rejected) throw new Error("an open socket with no WISP greeting must reject");
+  } finally {
+    window.WebSocket = RealWS;
+  }
+});
+```
+
+- [ ] **Step 2: Run the page suite to see it fail**
+
+Run: `node tests/run-tests.mjs tests/ui.spec.mjs`
+Expected: FAIL — the current `preflightRelay` resolves on `open`, so the `nogreet` case resolves instead of rejecting.
+
+- [ ] **Step 3: Upgrade `preflightRelay` in js/ui.js**
+
+Replace the body from `ws.onopen = () => finish(true);` down to the `ws.onerror = …` line with:
+
+```js
+    ws.binaryType = "arraybuffer";
+    // Resolve only once the relay proves it speaks WISP: a compliant WISP v1
+    // server sends a CONTINUE frame (type 0x03) on stream 0 the moment the
+    // socket opens. Resolving on `open` alone would call a plain WebSocket
+    // echo server — or a page's own origin being silently 403'd after the
+    // TCP connect — a "working relay". This also surfaces an Origin rejection
+    // (the relay answering the upgrade with 403) as an `error`, i.e. a clear
+    // failure, instead of a false success.
+    ws.onopen = () => {};
+    ws.onmessage = (ev) => {
+      const bytes = new Uint8Array(ev.data);
+      // WISP frame: [type(1)][streamId(4, LE)][payload]. Greeting = CONTINUE
+      // (0x03) on stream 0.
+      if (bytes.length >= 5 && bytes[0] === 0x03 &&
+          bytes[1] === 0 && bytes[2] === 0 && bytes[3] === 0 && bytes[4] === 0) {
+        finish(true);
+      } else {
+        finish(false, new Error(`Relay at ${relayUrl} did not send a WISP greeting.`));
+      }
+    };
+    ws.onerror = () => finish(false, new Error(`Could not connect to relay at ${relayUrl}.`));
+```
+
+Update the JSDoc above `preflightRelay` to say it resolves on the WISP `CONTINUE` greeting (not on `open`), and that a plain WebSocket server therefore fails the check.
+
+- [ ] **Step 4: Run the page suite to see it pass**
+
+Run: `node tests/run-tests.mjs tests/ui.spec.mjs`
+Expected: PASS.
+
+- [ ] **Step 5: Add the button to selfhost.html**
+
+In `deploy/selfhost-web/selfhost.html`, change the relay field block (lines ~190–195) to add a button and a result line:
+
+```html
+      <div class="field">
+        <label for="field-relay-url">Relay address</label>
+        <input id="field-relay-url" name="relayUrl" type="text" value="wisp://localhost:8086">
+        <button type="button" id="btn-test-connection">Test connection</button>
+        <p id="test-connection-result" data-testid="test-connection-result" class="hint" hidden></p>
+        <p class="field-error" data-error-for="relayUrl"></p>
+        <p class="hint">No relay running yet? See the instructions below.</p>
+      </div>
+```
+
+- [ ] **Step 6: Wire the button in js/ui.js**
+
+In `collectElements` (~line 391), add `testConnectionBtn: byId("btn-test-connection"),` and `testConnectionResult: byId("test-connection-result"),`.
+
+Add a wiring function (near the other `wire*` helpers) and call it wherever the creation form is wired (search for where `els.createBtn` / `preflightRelay` is wired in the DOM-init path and add the call there):
+
+```js
+export function wireTestConnection(els, doc = document) {
+  if (!els.testConnectionBtn) return;
+  els.testConnectionBtn.addEventListener("click", async () => {
+    const relayUrl = els.fields.relayUrl.value.trim();
+    const result = els.testConnectionResult;
+    els.testConnectionBtn.disabled = true;
+    if (result) {
+      result.hidden = false;
+      result.className = "hint";
+      result.textContent = "Testing…";
+    }
+    try {
+      await preflightRelay(relayUrl);
+      if (result) { result.className = "hint"; result.textContent = "Relay reachable ✓"; }
+    } catch (err) {
+      if (result) {
+        result.className = "field-error";
+        result.textContent = err instanceof Error ? err.message : String(err);
+      }
+    } finally {
+      els.testConnectionBtn.disabled = false;
+    }
+  });
+}
+```
+
+- [ ] **Step 7: Run the full page suite**
+
+Run: `node tests/run-tests.mjs`
+Expected: all specs PASS (the subpath spec also verifies no absolute-rooted references crept in).
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add js/ui.js selfhost.html tests/ui.spec.mjs
+git commit -m "feat(selfhost): Test connection button with WISP-greeting validation"
+```
+
+---
+
 ## Final verification (after all tasks)
 
 From `deploy/selfhost-web/`:
@@ -2243,6 +2415,6 @@ From `deploy/selfhost-web/`:
 1. `python3 -m unittest relay_test -v` — unit suite green.
 2. `sh tests/relay-sh.test.sh` — wrapper pre-flight green.
 3. `node tests/relay-conformance.mjs` — conformance green against relay.py.
-4. `node tests/run-tests.mjs` — page suite green.
+4. `node tests/run-tests.mjs` — page suite green (includes the Task 11 "Test connection" spec).
 5. Push the branch and confirm both jobs of `selfhost-relay-tests.yml` pass — the `powershell-relay` job is the only real validation of relay.ps1.
 6. Optional (slow, real boot): `node tests/smoke-firstboot.mjs` — proves a v86 guest actually provisions through relay.py end to end.

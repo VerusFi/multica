@@ -160,3 +160,36 @@ the highest-risk piece of this design; see the risk table.
   entries for the new errors; the "unauthenticated proxy" disclosure stays intact.
 - `dev/NOTES.md`: updated where it ties the relay to the `selfhost-latest` release
   channel.
+
+## 7. Relay connectivity UX (added 2026-08-17)
+
+Two page-side additions decided after the architecture was reaffirmed (WISP stays;
+the local relay is a WISP v1 server, not a plain WebSocket bridge — a plain bridge
+cannot serve v86, which speaks multiplexed WISP over one socket via its native
+`WispNetworkAdapter`, never one-socket-per-connection).
+
+### "Test connection" button
+
+Next to the "Relay address" field, a **Test connection** button verifies the relay
+*functionally*, not just that a socket opens. The existing `preflightRelay()` in
+`js/ui.js` resolves on the WebSocket `open` event; it is upgraded to resolve only
+after receiving the relay's initial WISP greeting — a `CONTINUE` frame (type `0x03`)
+on stream `0`. This proves the endpoint is a real WISP v1 server (ours, a
+`wisp-server-node`, or a public one), rejects a plain WebSocket echo server that
+would otherwise look "reachable", and surfaces an Origin rejection (the relay
+answering the WebSocket upgrade with 403 because it was not told this page's origin)
+as a clear failure. The stronger check also strengthens the create-flow pre-flight,
+which calls the same function.
+
+The button shows a pending state while testing and an inline success/failure result;
+failure reuses the existing relay-error surface with its link to the run-a-relay
+instructions.
+
+### Public WISP relay option (documentation only)
+
+Because the relay address field already accepts any `wisp://` / `ws://` / `wss://`
+WISP v1 endpoint, a hosted/public WISP server is a valid relay with no code change.
+The README's "Running a relay" section documents this as an alternative to running
+your own, with the honest caveat that a third-party relay dials every outbound
+connection on your behalf and therefore sees all guest egress metadata — prefer your
+own local relay for anything sensitive.
