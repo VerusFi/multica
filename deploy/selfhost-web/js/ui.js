@@ -365,17 +365,19 @@ function computePagesUrl() {
 }
 
 // The relay is an unauthenticated outbound proxy, so it accepts WebSockets
-// only from localhost origins unless told otherwise (relay/main.go's
-// -origin / defaultOriginPatterns). This page may be served from anywhere
-// (a Pages site), so the one-liners hand the relay *this page's* origin via
+// only from localhost origins unless told otherwise (relay.py's -origin /
+// DEFAULT_ORIGIN_PATTERNS). This page may be served from anywhere (a Pages
+// site), so the one-liners hand the relay *this page's* origin via
 // MULTICA_RELAY_ORIGIN — the only origin that legitimately needs access —
-// instead of the relay having to trust every origin by default.
+// instead of the relay having to trust every origin by default. The page's
+// base URL rides along as MULTICA_RELAY_URL_BASE so relay.sh downloads
+// relay.py from the same site that served it (fork-friendly).
 function relayCommands() {
   const base = computePagesUrl();
   const origin = location.origin;
   return {
-    macos: `curl -fsSL ${base}relay.sh | MULTICA_RELAY_ORIGIN=${origin} sh`,
-    linux: `curl -fsSL ${base}relay.sh | MULTICA_RELAY_ORIGIN=${origin} sh`,
+    macos: `curl -fsSL ${base}relay.sh | MULTICA_RELAY_ORIGIN=${origin} MULTICA_RELAY_URL_BASE=${base} sh`,
+    linux: `curl -fsSL ${base}relay.sh | MULTICA_RELAY_ORIGIN=${origin} MULTICA_RELAY_URL_BASE=${base} sh`,
     windows: `$env:MULTICA_RELAY_ORIGIN='${origin}'; irm ${base}relay.ps1 | iex`,
   };
 }
