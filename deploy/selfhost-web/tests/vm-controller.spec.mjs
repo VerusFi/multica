@@ -137,4 +137,47 @@ export async function run() {
       throw new Error(`expected a "missing-passphrase:" onError report, got ${JSON.stringify(errors)}`);
     }
   }
+
+  // --- passphrase is delivered on the `network` marker, not the first byte -
+  // The guest's ttyS1 UART is only initialised ~1.7s into boot, and that 8250
+  // init CLEARS the port's RX FIFO — so a passphrase pushed at t=0 (the first
+  // serial byte) is discarded before init-selfhost's `head -n1 /dev/ttyS1`
+  // ever reads it, and the boot hangs forever. Delivery must instead start on
+  // the `network` phase marker (emitted immediately before that read, well
+  // after ttyS1 is up) and re-send until a later phase proves the read
+  // completed. Exercised white-box with a mock emulator; no v86 is booted.
+  {
+    const sends = [];
+    const ctl = new VmController({
+      instance: { id: "vmc-spec-passphrase-timing", name: "spec", diskSizeGB: 1, relayUrl: "wisp://localhost:1/" },
+      passphrase: "hunter2",
+      onPhase: () => {},
+      onError: () => {},
+      onSerial: () => {},
+      onStateChange: () => {},
+    });
+    ctl.emulator = { serial_send_bytes: (port, bytes) => sends.push({ port, text: new TextDecoder().decode(bytes) }) };
+    const feed = (s) => { for (const ch of s) ctl._onSerialByte(ch.charCodeAt(0)); };
+
+    // Early boot noise (the kernel banner) must NOT trigger a send.
+    feed("[    0.000000] Linux version 6.18.44-0-virt ...\n");
+    if (sends.length !== 0) {
+      throw new Error(`passphrase sent before the network phase (${sends.length} send(s)) — those bytes are dropped by the ttyS1 FIFO reset`);
+    }
+
+    // The `network` marker is when delivery must start.
+    feed("@@SH:phase:network@@\n");
+    if (sends.length < 1) throw new Error("no passphrase sent when the network phase appeared");
+    if (sends[0].port !== 1) throw new Error(`passphrase must go to ttyS1 (serial index 1), got ${sends[0].port}`);
+    if (sends[0].text !== "hunter2\n") throw new Error(`expected "hunter2\\n" on ttyS1, got ${JSON.stringify(sends[0].text)}`);
+    if (ctl._passphraseTimer === null) throw new Error("expected a re-send timer to be armed after the network phase");
+
+    // A later phase proves the guest read the passphrase -> stop re-sending.
+    feed("@@SH:phase:luks@@\n");
+    if (ctl._passphraseTimer !== null) {
+      throw new Error("re-send timer must be cleared once a later phase (luks) proves the passphrase was read");
+    }
+
+    ctl._stopPassphraseDelivery(); // guard against a leaked interval if asserts move
+  }
 }
