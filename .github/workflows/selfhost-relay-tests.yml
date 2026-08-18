@@ -1,0 +1,48 @@
+name: selfhost-relay-tests
+
+# Conformance and unit tests for the script-only relay implementations:
+# relay.py on ubuntu (the environment relay.sh targets) and relay.ps1 on a
+# Windows runner — real Windows PowerShell 5.1, the environment users
+# actually have, NOT pwsh (HttpListener WebSocket support differs off
+# Windows). tests/relay-conformance.mjs is the shared parity gate.
+on:
+  push:
+    branches: [main]
+    paths: ["deploy/selfhost-web/**"]
+  pull_request:
+    paths: ["deploy/selfhost-web/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  python-relay:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: deploy/selfhost-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Unit tests (stdlib unittest)
+        run: python3 -m unittest relay_test -v
+      - name: relay.sh pre-flight tests
+        run: sh tests/relay-sh.test.sh
+      - name: WISP conformance (relay.py)
+        run: node tests/relay-conformance.mjs
+
+  powershell-relay:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: deploy/selfhost-web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: WISP conformance (relay.ps1 on Windows PowerShell 5.1)
+        run: node tests/relay-conformance.mjs powershell -NoProfile -ExecutionPolicy Bypass -File relay.ps1
