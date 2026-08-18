@@ -2520,6 +2520,12 @@ every future release staying disciplined about a flag.
   /repo/.github/workflows/selfhost-release.yml
   /repo/.github/workflows/selfhost-pages.yml` — clean.
 
+**2026-08-17 update (script-only relay):** the five `multica-relay-*`
+binaries no longer exist — the relay was rewritten as `relay.py` /
+`relay.ps1`, served as static files by the Pages site itself. The
+`selfhost-latest` channel now carries only the payload tarball and the two
+boot artifacts, and `vm-controller.js` is its only in-repo consumer.
+
 ---
 
 # Task 19 — README, manual E2E checklist, slow first-boot smoke

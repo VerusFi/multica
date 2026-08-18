@@ -19,13 +19,14 @@ mechanism for the same product, optimized for "try it with zero install."
   (`js/instance-manager.js`). Nothing about a running instance leaves your
   machine except outbound guest network traffic, which is tunneled through
   the relay below.
-- **The relay** (`relay/`, shipped prebuilt via GitHub Releases, source
-  small enough to read in five minutes) is a tiny local process that speaks
-  the [WISP protocol](https://github.com/MercuryWorkshop/wisp-protocol) on
-  one side and plain outbound TCP on the other. The guest's virtual NIC has
+- **The relay** (`relay.py`, and `relay.ps1` on Windows — plain scripts you
+  can read before running, served as static files from this same site) is a
+  tiny local process that speaks the
+  [WISP protocol](https://github.com/MercuryWorkshop/wisp-protocol) on one
+  side and plain outbound TCP/UDP on the other. The guest's virtual NIC has
   no other way to reach the internet — a browser tab cannot open raw TCP
   sockets, so v86's guest network traffic is tunneled to this relay over a
-  WebSocket, and the relay does the actual `net.Dial` on your machine's
+  WebSocket, and the relay does the actual dialing on your machine's
   behalf. It relays; it doesn't proxy your multica data anywhere.
 - **The guest** is a from-scratch Alpine Linux 386 image (kernel + initramfs
   in `boot/`, provisioning scripts in `guest/`) that partitions and
@@ -52,7 +53,7 @@ mechanism for the same product, optimized for "try it with zero install."
 `.github/workflows/selfhost-pages.yml` (already in this repo) builds and
 deploys this directory on every push to `main`/`feature/selfhost-in-browser`
 that touches `deploy/selfhost-web/**`, plus manual `workflow_dispatch`. It
-stages only page assets — `dev/`, `tests/`, `relay/` (Go sources), and
+stages only page assets — `dev/`, `tests/`, `relay_test.py`, and
 `node_modules/` are excluded via `rsync --exclude`; `vendor/` (the v86/xterm
 runtime) and `boot/` (kernel + initramfs) *do* ship, since the page needs
 both.
@@ -85,16 +86,16 @@ marketing landing page with a **Selfhost** button pointing at
 
 ## Running a relay
 
-The relay is a small Go binary, cross-compiled for macOS/Linux/Windows by
-`.github/workflows/selfhost-release.yml` and published to this repo's
-rolling `selfhost-latest` release tag (deliberately *not* the plain "latest
-release" slot, which the ordinary `vX.Y.Z` app releases already claim — see
-`relay.sh`'s own comment). The page's "Run a relay" panel shows the right
-one-liner for the detected OS tab; the three commands are:
+The relay needs no compiled binary and no GitHub Releases: on macOS/Linux
+it is `relay.py`, a single Python (≥ 3.9, standard library only) file; on
+Windows it is `relay.ps1`, a self-contained PowerShell script running on
+the PowerShell 5.1 + .NET every Windows 10+ ships. The page's "Run a
+relay" panel shows the right one-liner for the detected OS tab; the three
+commands are:
 
 ```sh
 # macOS / Linux
-curl -fsSL <pages-url>/relay.sh | MULTICA_RELAY_ORIGIN=<page-origin> sh
+curl -fsSL <pages-url>/relay.sh | MULTICA_RELAY_ORIGIN=<page-origin> MULTICA_RELAY_URL_BASE=<pages-url> sh
 ```
 
 ```powershell
@@ -102,13 +103,15 @@ curl -fsSL <pages-url>/relay.sh | MULTICA_RELAY_ORIGIN=<page-origin> sh
 $env:MULTICA_RELAY_ORIGIN='<page-origin>'; irm <pages-url>/relay.ps1 | iex
 ```
 
-Both scripts detect your OS/architecture, download the matching
-`multica-relay-*` binary from the `selfhost-latest` release into
-`~/.multica/` (`%USERPROFILE%\.multica` on Windows), and run it in the
+`relay.sh` checks that a usable `python3` exists first — on macOS that
+means Apple's Command Line Tools (`xcode-select --install`); on Linux,
+your distribution's `python3` package — then downloads `relay.py` from
+`MULTICA_RELAY_URL_BASE` (the page fills in its own base URL; default: the
+canonical fork's Pages site) into `~/.multica/` and runs it in the
 foreground, printing `wisp://localhost:8086` — the address the page's
-"Relay address" field already defaults to. `MULTICA_RELAY_URL_BASE` can
-override the download source (e.g. to point at a local build — see "Local
-usage without Pages").
+"Relay address" field already defaults to. Extra arguments after `sh -s --`
+are forwarded to the relay. `relay.ps1` is the whole relay in one file —
+nothing else is downloaded.
 
 **Who can reach the relay (and why the one-liner carries an origin).** The
 relay is an *unauthenticated* outbound TCP/UDP proxy — that is its entire
@@ -128,7 +131,7 @@ proxy for other people:
   site) has that site's origin, which must be allowed explicitly — hence
   `MULTICA_RELAY_ORIGIN` above, which the page's own "Run a relay" panel
   fills in with its own origin for you (the copy button gives you the
-  complete command). Equivalent flags on the binary: `-origin
+  complete command). Equivalent flags on the relay: `-origin
   https://owner.github.io` (repeatable, comma-separated, full URL or bare
   `host[:port]`), and `-allow-any-origin` as a documented last resort that
   restores the old trust-everything behavior — it logs a warning because with
@@ -149,6 +152,15 @@ plain `ws://`; if you need TLS, put a local TLS-terminating proxy (e.g.
 `stunnel`, `caddy`) in front of the relay and point the page's relay URL at
 `wss://localhost:<port>/` through that proxy instead. This is a real,
 disclosed limitation of the shipped relay, not a bug.
+
+**Using a public relay instead of running your own.** The "Relay address"
+field accepts any WISP v1 endpoint (`wisp://`, or `ws://` / `wss://`), not
+just a relay on your own machine — a hosted WISP server works with no change
+here, and the page's **Test connection** button confirms it before you
+create an instance. The trade-off is real: a third-party relay dials every
+outbound connection on your guest's behalf and therefore sees all of that
+egress (which hosts, when). For anything sensitive, run your own relay
+locally; treat a public relay as a convenience for throwaway trials.
 
 **`wsnic` (advanced, not needed by this build).** v86 also supports a raw
 `ws://`-based network backend as an alternative to `wisp://`, and some v86
@@ -173,11 +185,10 @@ python3 -m http.server 8000   # or: npx serve, caddy file-server, etc.
 ```
 
 Then open `http://localhost:8000/selfhost.html` and run a relay as above
-(or build one locally: `cd relay && go build -o multica-relay .`, matching
-what `relay.sh` downloads). The default `wisp://localhost:8086` relay
-address works unchanged since both the page and the relay are on
-`localhost` — no `wss://` concern applies to a plain `http://localhost`
-page.
+(or run it straight from the checkout: `python3 relay.py`). The default
+`wisp://localhost:8086` relay address works unchanged since both the page
+and the relay are on `localhost` — no `wss://` concern applies to a plain
+`http://localhost` page.
 
 ## Security stance
 
@@ -255,9 +266,11 @@ boot-time budgets during development, and each trade-off is flagged in
   32-bit, Intel 80386` (i.e., matches the guest's actual CPU target) —
   it does not verify a signature or checksum against a trusted source for
   the payload tarball as a whole. The tarball is built and published by this
-  repo's own CI (`selfhost-release.yml`) and downloaded by the relay
-  one-liners over HTTPS from GitHub Releases, so the practical exposure is
-  "trust GitHub Releases over HTTPS," not "trust an arbitrary unauthenticated
+  repo's own CI (`selfhost-release.yml`) and downloaded by the guest over
+  HTTPS from GitHub Releases; the relay itself is no longer a downloaded
+  binary at all — it is script source (`relay.py` / `relay.ps1`) served from
+  this site, readable before you run it, so the practical exposure is "trust
+  GitHub Releases over HTTPS," not "trust an arbitrary unauthenticated
   source" — but there is no independent signature check on top of that.
 
 None of these are hidden — they're the same caveats recorded in
@@ -406,13 +419,14 @@ part of a normal checkout and are out of scope for this README.
   open a WebSocket to the relay URL you entered and it didn't connect
   within 5 seconds. Confirm the relay is actually running and the address/
   port match (`wisp://localhost:8086` is the default both sides agree on).
-- **Relay download 404s**: `relay.sh`/`relay.ps1` pull from this repo's
-  `selfhost-latest` release tag, not the plain "latest release" (which is
-  claimed by ordinary app releases and ships no relay binaries at all). If
-  you're on a fork with no releases published yet, build the relay locally
-  instead (see "Local usage without Pages") and set
-  `MULTICA_RELAY_URL_BASE`/`$env:MULTICA_RELAY_URL_BASE` to your own
-  release/host if you want the one-liners to work unmodified.
+- **Relay download 404s**: `relay.sh` downloads `relay.py` from
+  `MULTICA_RELAY_URL_BASE` (the page fills in its own origin; default: the
+  canonical fork's Pages site), not GitHub Releases — a 404 usually means
+  that base URL doesn't serve `relay.py` at `<base>/relay.py`. If you're on
+  a fork with a different Pages URL, set
+  `MULTICA_RELAY_URL_BASE`/`$env:MULTICA_RELAY_URL_BASE` explicitly (or run
+  `python3 relay.py` straight from a checkout — see "Local usage without
+  Pages"). `relay.ps1` downloads nothing, so this doesn't apply to it.
 - **WebSocket blocked / mixed content errors in the console**: see the
   `wss://` note above.
 - **Relay refuses the connection and logs `websocket accept rejected
