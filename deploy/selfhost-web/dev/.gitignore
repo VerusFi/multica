@@ -11,7 +11,6 @@ alpine-virt-3.23.5-x86.iso
 node_modules/
 package.json
 package-lock.json
-.relay-bin
 empty-disk.img
 # Symlink to the locally-built payload tarball (Task 5's
 # build-selfhost-tarball.sh output, e.g. /tmp/multica-selfhost-386.tar.gz)

@@ -19,7 +19,7 @@
 import { chromium } from "playwright";
 import { createServer } from "http";
 import { statSync, readFileSync } from "fs";
-import { execSync, spawn } from "child_process";
+import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import path, { extname } from "path";
 
@@ -53,13 +53,10 @@ const srv = createServer((req, res) => {
   }
 }).listen(18123);
 
-// Same relay-build-and-spawn pattern as every other verify-*.mjs (see
-// dev/NOTES.md re: `go run` module-resolution/orphan-process issues from
-// dev/).
-const relayDir = new URL("../relay", import.meta.url).pathname;
-const relayBin = new URL(".", import.meta.url).pathname + ".relay-bin";
-execSync("go build -o " + JSON.stringify(relayBin) + " .", { cwd: relayDir, stdio: "inherit" });
-const relay = spawn(relayBin, ["-listen", ":18086"], { stdio: "inherit" });
+// Same relay-spawn pattern as every other verify-*.mjs: relay is relay.py,
+// spawned directly via `python3`, no build step.
+const relayPy = new URL("../relay.py", import.meta.url).pathname;
+const relay = spawn("python3", [relayPy, "-listen", ":18086"], { stdio: "inherit" });
 
 const browser = await chromium.launch();
 const page = await browser.newPage();

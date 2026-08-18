@@ -2,7 +2,7 @@
 import { chromium } from "playwright";
 import { createServer } from "http";
 import { readFileSync, existsSync } from "fs";
-import { execSync, spawn } from "child_process";
+import { spawn } from "child_process";
 
 // NOTE: brief's default ports (relay :8086, static server :8123) were both
 // already bound by unrelated processes on this dev machine (a Lima VM
@@ -10,22 +10,11 @@ import { execSync, spawn } from "child_process";
 // purely a local port choice and does not affect the WISP verification
 // itself. harness.html's net_device.relay_url is kept in sync — see
 // dev/NOTES.md.
-// NOTE: `go run ../relay` invoked with cwd=dev/ does not resolve the
-// relay's module on this toolchain (go1.26.1) — go's module search walks
-// UP from cwd looking for go.mod and, finding none between dev/ and the
-// repo's .git boundary, errors with "cannot find main module". Also,
-// `go run` forks a build step whose resulting binary is a *child* process
-// of the `go run` process; killing the `go run` process (e.g. via
-// relay.kill() below) does not reliably kill that child on macOS, leaving
-// an orphaned relay listening on the port across runs — this silently
-// invalidated an early negative-control test (the "test" was talking to a
-// leftover relay from a prior run, not the one this script started). Fix:
-// `go build` a real binary once and spawn *that*, so relay.kill() controls
-// the actual listening process. See dev/NOTES.md.
-const relayDir = new URL("../relay", import.meta.url).pathname;
-const relayBin = new URL(".", import.meta.url).pathname + ".relay-bin";
-execSync("go build -o " + JSON.stringify(relayBin) + " .", { cwd: relayDir, stdio: "inherit" });
-const relay = spawn(relayBin, ["-listen", ":18086"], { stdio: "inherit" });
+// NOTE: relay is relay.py, spawned directly via `python3` — no build step,
+// so relay.kill() below controls the actual listening process directly.
+// See dev/NOTES.md for the historical go-run/go-build rationale.
+const relayPy = new URL("../relay.py", import.meta.url).pathname;
+const relay = spawn("python3", [relayPy, "-listen", ":18086"], { stdio: "inherit" });
 // static file server on :18123 serving this directory
 const srv = createServer((req, res) => {
   const path = "." + (req.url === "/" ? "/harness.html" : req.url.split("?")[0]);
