@@ -38,8 +38,8 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # go build (backend, GOARCH=386) and the relay cross-compile matrix
-      # below both need Go; pin it the same way the repo's own Go jobs do.
+      # The linux/386 backend build inside build-selfhost-tarball.sh needs
+      # Go; pin it the same way the repo's own Go jobs do.
       - name: Setup Go
         uses: actions/setup-go@v5
         with:

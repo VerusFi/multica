@@ -133,9 +133,12 @@ proxy for other people:
   fills in with its own origin for you (the copy button gives you the
   complete command). Equivalent flags on the relay: `-origin
   https://owner.github.io` (repeatable, comma-separated, full URL or bare
-  `host[:port]`), and `-allow-any-origin` as a documented last resort that
-  restores the old trust-everything behavior — it logs a warning because with
-  it set, any site in any tab can use your relay.
+  `host[:port]`; on Windows/`relay.ps1`, PowerShell's `[string[]]` parameter
+  binder rejects the flag given twice, so multiple origins must be passed as
+  one comma-separated `-Origin a,b` — `relay.py` accepts either form), and
+  `-allow-any-origin` as a documented last resort that restores the old
+  trust-everything behavior — it logs a warning because with it set, any site
+  in any tab can use your relay.
 
 **The `wss://` constraint.** A page served over `https://` (which every
 GitHub Pages deployment is) runs in a browser "secure context." A plain
@@ -420,7 +423,7 @@ part of a normal checkout and are out of scope for this README.
   within 5 seconds. Confirm the relay is actually running and the address/
   port match (`wisp://localhost:8086` is the default both sides agree on).
 - **Relay download 404s**: `relay.sh` downloads `relay.py` from
-  `MULTICA_RELAY_URL_BASE` (the page fills in its own origin; default: the
+  `MULTICA_RELAY_URL_BASE` (the page fills in its own base URL; default: the
   canonical fork's Pages site), not GitHub Releases — a 404 usually means
   that base URL doesn't serve `relay.py` at `<base>/relay.py`. If you're on
   a fork with a different Pages URL, set
