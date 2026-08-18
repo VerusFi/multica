@@ -191,6 +191,8 @@
       <div class="field">
         <label for="field-relay-url">Relay address</label>
         <input id="field-relay-url" name="relayUrl" type="text" value="wisp://localhost:8086">
+        <button type="button" id="btn-test-connection">Test connection</button>
+        <p id="test-connection-result" data-testid="test-connection-result" class="hint" hidden></p>
         <p class="field-error" data-error-for="relayUrl"></p>
         <p class="hint">No relay running yet? See the instructions below.</p>
       </div>

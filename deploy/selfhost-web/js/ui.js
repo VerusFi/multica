@@ -82,12 +82,17 @@ export function validateCreationForm(values) {
 }
 
 /**
- * Test whether a relay is reachable by opening a WebSocket to it.
- * `wisp://` addresses are dialled over `ws://` — WISP is a protocol layered
- * on top of a plain WebSocket, not a distinct transport scheme.
+ * Test whether a relay is a real WISP relay by opening a WebSocket to it and
+ * waiting for its initial WISP greeting. `wisp://` addresses are dialled
+ * over `ws://` — WISP is a protocol layered on top of a plain WebSocket, not
+ * a distinct transport scheme.
  * @param {string} relayUrl
  * @param {number} [timeoutMs=5000]
- * @returns {Promise<void>} resolves on `open`, rejects on `error` or timeout.
+ * @returns {Promise<void>} resolves once the relay sends a WISP `CONTINUE`
+ * frame (type `0x03`) on stream 0 — the greeting a compliant WISP v1 server
+ * sends immediately after the socket opens. Rejects on `error`, on timeout,
+ * or if the first frame received is not that greeting (e.g. a plain
+ * WebSocket echo server that isn't speaking WISP at all).
  */
 export function preflightRelay(relayUrl, timeoutMs = 5000) {
   return new Promise((resolve, reject) => {
@@ -120,7 +125,26 @@ export function preflightRelay(relayUrl, timeoutMs = 5000) {
       finish(false, err instanceof Error ? err : new Error(String(err)));
       return;
     }
-    ws.onopen = () => finish(true);
+    ws.binaryType = "arraybuffer";
+    // Resolve only once the relay proves it speaks WISP: a compliant WISP v1
+    // server sends a CONTINUE frame (type 0x03) on stream 0 the moment the
+    // socket opens. Resolving on `open` alone would call a plain WebSocket
+    // echo server — or a page's own origin being silently 403'd after the
+    // TCP connect — a "working relay". This also surfaces an Origin rejection
+    // (the relay answering the upgrade with 403) as an `error`, i.e. a clear
+    // failure, instead of a false success.
+    ws.onopen = () => {};
+    ws.onmessage = (ev) => {
+      const bytes = new Uint8Array(ev.data);
+      // WISP frame: [type(1)][streamId(4, LE)][payload]. Greeting = CONTINUE
+      // (0x03) on stream 0.
+      if (bytes.length >= 5 && bytes[0] === 0x03 &&
+          bytes[1] === 0 && bytes[2] === 0 && bytes[3] === 0 && bytes[4] === 0) {
+        finish(true);
+      } else {
+        finish(false, new Error(`Relay at ${relayUrl} did not send a WISP greeting.`));
+      }
+    };
     ws.onerror = () => finish(false, new Error(`Could not connect to relay at ${relayUrl}.`));
   });
 }
@@ -391,6 +415,8 @@ function collectElements(doc) {
     cancelBtn: byId("btn-cancel-create"),
     createBtn: byId("btn-create"),
     relayError: byId("relay-error"),
+    testConnectionBtn: byId("btn-test-connection"),
+    testConnectionResult: byId("test-connection-result"),
     instanceList: byId("instance-list"),
     // Visible surface for lifecycle/runtime errors (see showLifecycleError).
     lifecycleError: byId("lifecycle-error"),
@@ -1018,6 +1044,38 @@ async function handleCreateSubmit(doc, els, event) {
   }
 }
 
+/**
+ * Wire the "Test connection" button next to the relay-address field: runs
+ * `preflightRelay` on demand and reports the pending/success/failure result
+ * inline, independent of submitting the creation form.
+ * @param {object} els
+ * @param {Document} [doc]
+ */
+export function wireTestConnection(els, doc = document) {
+  if (!els.testConnectionBtn) return;
+  els.testConnectionBtn.addEventListener("click", async () => {
+    const relayUrl = els.fields.relayUrl.value.trim();
+    const result = els.testConnectionResult;
+    els.testConnectionBtn.disabled = true;
+    if (result) {
+      result.hidden = false;
+      result.className = "hint";
+      result.textContent = "Testing…";
+    }
+    try {
+      await preflightRelay(relayUrl);
+      if (result) { result.className = "hint"; result.textContent = "Relay reachable ✓"; }
+    } catch (err) {
+      if (result) {
+        result.className = "field-error";
+        result.textContent = err instanceof Error ? err.message : String(err);
+      }
+    } finally {
+      els.testConnectionBtn.disabled = false;
+    }
+  });
+}
+
 function wireTabs(els) {
   for (const btn of els.tabButtons) {
     btn.addEventListener("click", () => {
@@ -1085,6 +1143,8 @@ export async function initSelfhostPage(doc = document) {
   if (els.creationForm) {
     els.creationForm.addEventListener("submit", (event) => handleCreateSubmit(doc, els, event));
   }
+
+  wireTestConnection(els, doc);
 
   if (els.pinGate) {
     els.pinGate.addEventListener("submit", (event) => handlePinUnlock(doc, els, event));

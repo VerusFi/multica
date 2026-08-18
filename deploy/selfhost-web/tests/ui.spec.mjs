@@ -88,6 +88,49 @@ export async function run() {
   }
   if (!preflightThrew) throw new Error("preflightRelay should reject when nothing listens");
 
+  // --- preflightRelay requires a WISP CONTINUE greeting, not just an open socket ---
+  // `run()` here already executes inside the page context (run-tests.mjs
+  // drives it via a single outer page.evaluate), so the mock WebSocket is
+  // installed directly on `window` rather than through a nested page.evaluate.
+  {
+    const RealWS = window.WebSocket;
+
+    // A fake WebSocket whose behavior is chosen by the URL query.
+    class FakeWS {
+      constructor(url) {
+        this.url = url;
+        this.binaryType = "blob";
+        this.onopen = this.onerror = this.onmessage = this.onclose = null;
+        setTimeout(() => {
+          this.onopen && this.onopen();
+          // Match on the URL path exactly (not a substring): "nogreet"
+          // itself contains "greet" as a substring, which would make a
+          // plain `url.includes("greet")` check fire the greeting for the
+          // "no greeting" case too and defeat the reject assertion below.
+          if (url.endsWith("/greet")) {
+            // WISP CONTINUE on stream 0: [0x03][0,0,0,0][buffer uint32]
+            const buf = new Uint8Array([0x03, 0, 0, 0, 0, 128, 0, 0, 0]);
+            this.onmessage && this.onmessage({ data: buf.buffer });
+          }
+          // "nogreet": opens but never sends a frame -> must time out/reject.
+        }, 0);
+      }
+      close() {}
+    }
+    window.WebSocket = FakeWS;
+    try {
+      let greeted = false;
+      await preflightRelay("wisp://localhost/greet", 500).then(() => (greeted = true));
+      if (!greeted) throw new Error("a WISP greeting should resolve preflightRelay");
+
+      let rejected = false;
+      await preflightRelay("wisp://localhost/nogreet", 300).catch(() => (rejected = true));
+      if (!rejected) throw new Error("an open socket with no WISP greeting must reject");
+    } finally {
+      window.WebSocket = RealWS;
+    }
+  }
+
   // --- DOM: empty DB shows exactly one "Create a self host instance" button ---
   if (!window.__selfhostReady) throw new Error("selfhost.html did not set window.__selfhostReady");
   await window.__selfhostReady;
