@@ -50,6 +50,12 @@ const MARKER_WINDOW = 512;
 const PHASE_RE = /@@SH:phase:(\w+)@@/g;
 const ERR_RE = /@@SH:err:(.+?)@@/g;
 
+// Passphrase-over-ttyS1 delivery cadence. See _startPassphraseDelivery for
+// why the passphrase is sent starting at the `network` marker and re-sent,
+// rather than pushed once at the first serial byte.
+const PASSPHRASE_RESEND_MS = 500;
+const PASSPHRASE_MAX_SENDS = 60; // ~30s backstop, then stop re-sending
+
 function errMessage(err) {
   return err && err.message ? err.message : String(err);
 }
@@ -197,7 +203,8 @@ export class VmController {
     this.emulator = null;
     this.blockStore = new BlockStore(instance.id);
 
-    this._passphraseSent = false;
+    this._passphraseTimer = null;
+    this._passphraseDelivered = false;
     this._seenPhases = new Set();
     this._seenErrors = new Set();
     this._markerBuf = "";
@@ -238,24 +245,14 @@ export class VmController {
   }
 
   _resetSerialParsing() {
-    this._passphraseSent = false;
+    this._stopPassphraseDelivery();
+    this._passphraseDelivered = false;
     this._seenPhases.clear();
     this._seenErrors.clear();
     this._markerBuf = "";
   }
 
   _onSerialByte(byte) {
-    // Passphrase delivery: write it to ttyS1 on the first serial output
-    // byte seen after boot. This does not need to be synchronized to any
-    // particular boot phase — the guest's tty layer buffers ttyS1 input
-    // until init actually reads it during the LUKS stage (see dev/NOTES.md
-    // "Task 6"), so sending it as soon as the emulator is demonstrably
-    // alive is both simpler and safe.
-    if (!this._passphraseSent) {
-      this._passphraseSent = true;
-      this.emulator.serial_send_bytes(1, new TextEncoder().encode(this.passphrase + "\n"));
-    }
-
     const ch = String.fromCharCode(byte);
     this._markerBuf += ch;
     if (this._markerBuf.length > MARKER_WINDOW) {
@@ -266,12 +263,52 @@ export class VmController {
     this.onSerial && this.onSerial(ch);
   }
 
+  // Deliver the LUKS passphrase to ttyS1, timed to the guest actually being
+  // ready to receive it. The guest's ttyS1 UART is only initialised ~1.7s
+  // into boot, and that 8250 init CLEARS the port's RX FIFO — so a passphrase
+  // pushed at t=0 (the first serial byte, as this used to do) is discarded
+  // before init-selfhost's `head -n1 /dev/ttyS1` ever reads it, and the boot
+  // hangs forever waiting for a line that never arrives. Instead delivery
+  // starts on the `network` phase marker (emitted immediately before that
+  // read, well after ttyS1 is up) and re-sends on a short interval until the
+  // next phase proves the read completed. Re-sends are harmless: once `head`
+  // has consumed its line nothing reads ttyS1 again, and re-sending also
+  // covers a passphrase longer than the 16-byte UART RX FIFO — the guest
+  // drains the FIFO into its tty buffer once it opens the port, so a later
+  // send completes the line.
+  _startPassphraseDelivery() {
+    if (this._passphraseDelivered || this._passphraseTimer !== null) return;
+    let sends = 0;
+    const send = () => {
+      if (!this.emulator) return;
+      this.emulator.serial_send_bytes(1, new TextEncoder().encode(this.passphrase + "\n"));
+      sends += 1;
+      if (sends >= PASSPHRASE_MAX_SENDS) this._stopPassphraseDelivery();
+    };
+    send();
+    this._passphraseTimer = setInterval(send, PASSPHRASE_RESEND_MS);
+  }
+
+  _stopPassphraseDelivery() {
+    this._passphraseDelivered = true;
+    if (this._passphraseTimer !== null) {
+      clearInterval(this._passphraseTimer);
+      this._passphraseTimer = null;
+    }
+  }
+
   _scanMarkers() {
     PHASE_RE.lastIndex = 0;
     let m;
     while ((m = PHASE_RE.exec(this._markerBuf))) {
       if (!this._seenPhases.has(m[1])) {
         this._seenPhases.add(m[1]);
+        // The passphrase read (init-selfhost's `head -n1 /dev/ttyS1`) sits
+        // right after the `network` mark and before every later mark: start
+        // delivering on `network`, and stop as soon as any later phase shows
+        // the guest advanced past the read.
+        if (m[1] === "network") this._startPassphraseDelivery();
+        else this._stopPassphraseDelivery();
         this.onPhase && this.onPhase(m[1]);
       }
     }
@@ -343,6 +380,7 @@ export class VmController {
   async discard() {
     return this._enqueue(async () => {
       this._stopAutosave();
+      this._stopPassphraseDelivery();
       if (this.emulator) {
         try {
           if (this.state === "running") await this.emulator.stop();
@@ -367,10 +405,11 @@ export class VmController {
   // on top of an already-reported failure.
   async _start() {
     if (this.state !== "stopped") return;
-    // Refuses rather than booting with a missing passphrase: _onSerialByte
-    // sends `this.passphrase + "\n"` to ttyS1 unconditionally, so an
-    // undefined/empty one would type the literal string "undefined" (or a
-    // bare newline) at the guest's LUKS prompt — and on a first boot,
+    // Refuses rather than booting with a missing passphrase: passphrase
+    // delivery (_startPassphraseDelivery, on the `network` mark) sends
+    // `this.passphrase + "\n"` to ttyS1, so an undefined/empty one would type
+    // the literal string "undefined" (or a bare newline) at the guest's LUKS
+    // prompt — and on a first boot,
     // stage1_disk would *format* the disk with it. The host page also guards
     // this before constructing a controller (js/ui.js's
     // getOrCreateController); this is the same guard at the layer that
@@ -447,6 +486,7 @@ export class VmController {
   async _stop() {
     if (this.state === "stopped") return;
     this._stopAutosave();
+    this._stopPassphraseDelivery();
     if (this.emulator) {
       if (this.state === "running") await this.emulator.stop();
       const bytes = await this.emulator.save_state();
