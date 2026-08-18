@@ -57,7 +57,7 @@ expect_failure_with "python3-too-old" "Python 3.9 or newer"
 
 # --- 5. download failure cleans up the partial file --------------------------
 write_stub "$fakebin/python3" 'exit 0'
-write_stub "$fakebin/curl" 'exit 22'
+write_stub "$fakebin/curl" 'while [ "$#" -gt 1 ]; do shift; done; echo partial > "$1"; exit 22'
 for tool in mkdir rm; do ln -sf "$(command -v $tool)" "$fakebin/$tool"; done
 run_relay_sh
 expect_failure_with "download-failure" "Failed to download relay.py"
