@@ -23,13 +23,14 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-      # Page assets only: dev harness, tests, relay sources and node_modules
-      # never ship to Pages (plan Task 17).
+      # Page assets only: dev harness, tests, the relay's unit tests and
+      # node_modules never ship to Pages. relay.py / relay.sh / relay.ps1 DO
+      # ship — the relay is served as static files from this site.
       - name: Stage page assets
         run: |
           mkdir -p "$RUNNER_TEMP/pages-artifact"
           rsync -a deploy/selfhost-web/ "$RUNNER_TEMP/pages-artifact/" \
-            --exclude dev/ --exclude tests/ --exclude relay/ --exclude node_modules/
+            --exclude dev/ --exclude tests/ --exclude relay_test.py --exclude node_modules/
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
